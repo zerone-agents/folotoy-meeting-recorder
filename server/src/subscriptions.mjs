@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { validateWecomWebhook } from './wecom.mjs';
 
 const validUrl = (value, allowLocalHttp = true) => {
   if (typeof value !== 'string' || value.length > 2048) return null;
@@ -48,6 +49,18 @@ export function initializeSubscriptions(db) {
   if (!columns.has('share_days')) db.exec('ALTER TABLE meeting_subscriptions ADD COLUMN share_days INTEGER NOT NULL DEFAULT 7 CHECK(share_days BETWEEN 1 AND 365)');
   if (!columns.has('include_transcript')) db.exec('ALTER TABLE meeting_subscriptions ADD COLUMN include_transcript INTEGER NOT NULL DEFAULT 0 CHECK(include_transcript IN (0,1))');
   if (!columns.has('allow_download')) db.exec('ALTER TABLE meeting_subscriptions ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0 CHECK(allow_download IN (0,1))');
+  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_subscriptions'").get();
+  const marker = db.prepare("SELECT value FROM service_metadata WHERE key='subscription_schema'").get()?.value;
+  const subscriptionColumns = () => new Set(db.prepare('PRAGMA table_info(meeting_subscriptions)').all().map(column => column.name));
+  if (table && marker === '1' && !subscriptionColumns().has('channel')) throw new Error('invalid_subscription_state');
+  if (marker !== undefined && marker !== '1') throw new Error('invalid_subscription_state');
+  if (!subscriptionColumns().has('channel')) db.exec("ALTER TABLE meeting_subscriptions ADD COLUMN channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))");
+  db.exec(`CREATE TABLE IF NOT EXISTS wecom_rate_limits(webhook_hash TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL CHECK(next_allowed_at>=0));
+    INSERT INTO service_metadata(key,value) VALUES('subscription_schema','1') ON CONFLICT(key) DO UPDATE SET value='1';`);
+  for (const [name, definition] of [['payload_json', 'TEXT'], ['share_expires_at', 'INTEGER'], ['failed_at', 'INTEGER']]) {
+    const deliveryColumns = new Set(db.prepare('PRAGMA table_info(subscription_deliveries)').all().map(column => column.name));
+    if (!deliveryColumns.has(name)) db.exec(`ALTER TABLE subscription_deliveries ADD COLUMN ${name} ${definition}`);
+  }
 }
 
 export class SubscriptionStore {
@@ -62,9 +75,22 @@ export class SubscriptionStore {
       .run(id, name.trim(), url, callbackToken, now);
     return { id, status: 'pending' };
   }
+  createWecom({ name, callbackUrl, days = 7, includeTranscript = false, allowDownload = false, now = Math.floor(Date.now() / 1000) }) {
+    const url = validateWecomWebhook(callbackUrl), share = shareConfig({ days, includeTranscript, allowDownload });
+    if (typeof name !== 'string' || !name.trim() || name.length > 100 || !Number.isSafeInteger(now) || now < 0) throw new Error('invalid');
+    const id = randomUUID();
+    this.db.prepare("INSERT INTO meeting_subscriptions(id,name,callback_url,status,created_at,reviewed_at,share_days,include_transcript,allow_download,channel) VALUES(?,?,?,'approved',?,?,?,?,?,'wecom')")
+      .run(id, name.trim(), url, now, now, share.days, share.includeTranscript ? 1 : 0, share.allowDownload ? 1 : 0);
+    return { id, status: 'approved', channel: 'wecom', ...share };
+  }
+  wecomTarget(id) {
+    const row = this.db.prepare("SELECT id,callback_url AS callbackUrl FROM meeting_subscriptions WHERE id=? AND channel='wecom' AND status='approved'").get(id);
+    if (!row) throw new Error('not_found');
+    return row;
+  }
   list() {
-    return this.db.prepare('SELECT id,name,callback_url AS callbackUrl,status,share_days AS days,include_transcript AS includeTranscript,allow_download AS allowDownload,created_at AS createdAt,reviewed_at AS reviewedAt FROM meeting_subscriptions ORDER BY created_at,rowid').all()
-      .map(row => ({ ...row, includeTranscript: Boolean(row.includeTranscript), allowDownload: Boolean(row.allowDownload) }));
+    return this.db.prepare('SELECT id,name,callback_url AS callbackUrl,status,channel,share_days AS days,include_transcript AS includeTranscript,allow_download AS allowDownload,created_at AS createdAt,reviewed_at AS reviewedAt FROM meeting_subscriptions ORDER BY created_at,rowid').all()
+      .map(row => ({ ...row, callbackUrl: row.channel === 'wecom' ? 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send' : row.callbackUrl, includeTranscript: Boolean(row.includeTranscript), allowDownload: Boolean(row.allowDownload) }));
   }
   review(id, approve, now = Math.floor(Date.now() / 1000), config = {}) {
     if (typeof id !== 'string' || !Number.isSafeInteger(now) || now < 0) throw new Error('invalid');
@@ -92,7 +118,7 @@ export class SubscriptionStore {
     return { id, status: 'revoked' };
   }
   deliveries() {
-    return this.db.prepare('SELECT event_id AS eventId,subscription_id AS subscriptionId,meeting_id AS meetingId,meeting_generation AS meetingGeneration,attempts,delivered_at AS deliveredAt,last_error AS lastError FROM subscription_deliveries ORDER BY created_at,event_id').all();
+    return this.db.prepare('SELECT event_id AS eventId,subscription_id AS subscriptionId,meeting_id AS meetingId,meeting_generation AS meetingGeneration,attempts,delivered_at AS deliveredAt,failed_at AS failedAt,last_error AS lastError FROM subscription_deliveries ORDER BY created_at,event_id').all();
   }
 }
 

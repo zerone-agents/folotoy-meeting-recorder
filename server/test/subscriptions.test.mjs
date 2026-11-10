@@ -46,7 +46,7 @@ test('failed callbacks retry with the same event and revocation cancels pending 
     const { id } = subscriptions.apply('service', 'https://subscriber.example/hooks');subscriptions.review(id, true);completedMeeting(store);
     const calls = [];
     await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', fetchImpl: async () => { calls.push(1); return new Response(null, { status: 503 }); } });
-    let delivery = subscriptions.deliveries()[0];assert.equal(delivery.attempts, 1);assert.equal(delivery.lastError, 'http_503');assert.equal(delivery.deliveredAt, null);
+    let delivery = subscriptions.deliveries()[0];assert.equal(delivery.attempts, 1);assert.equal(delivery.lastError, 'http_503');assert.equal(delivery.deliveredAt, null);assert.equal(delivery.failedAt, null);assert.equal('payloadJson' in delivery, false);
     store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=0').run();
     await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', fetchImpl: async (_url, options) => { calls.push(JSON.parse(options.body).eventId); return new Response(null, { status: 200 }); } });
     assert.equal(calls[1], delivery.eventId);
