@@ -6,7 +6,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MeetingStore} from '../src/store.mjs';
-import {SubscriptionStore,initializeSubscriptions,reserveWecomSlot} from '../src/subscriptions.mjs';
+import {SubscriptionStore,initializeSubscriptions,reserveWecomSlot,drainSubscriptions,queueSubscriptionDeliveries} from '../src/subscriptions.mjs';
 import {createMeetingRouter} from '../src/routes.mjs';
 
 const key='a'.repeat(16);
@@ -177,4 +177,38 @@ test('rate slots persist across restart and the twenty-first send waits',()=>{
     assert.deepEqual(reserveWecomSlot(store.db,url,1059),{ok:false,retryAt:1060});
     assert.deepEqual(reserveWecomSlot(store.db,url,1060),{ok:true,reservedAt:1060});
   }finally{store.close();rmSync(directory,{recursive:true,force:true})}
+});
+
+
+function wecomCompletedMeeting(store,id='m'){
+  store.create('d',id);
+  store.db.prepare("UPDATE meetings SET state='completed',minutes=?,completed_at=1794301200 WHERE id=?").run(JSON.stringify({meeting:{topic:'产品周会'},summary:'synthetic'}),id);
+  queueSubscriptionDeliveries(store.db,id,1,1000);
+}
+
+test('WeCom retry freezes card body and configuration',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const bot=subscriptions.createWecom({name:'群',callbackUrl:url,now:1});wecomCompletedMeeting(store);
+    const bodies=[];let calls=0;
+    const options={baseUrl:'https://example.com',now:()=>1000+calls*3,fetchImpl:async(_url,request)=>{bodies.push(request.body);calls++;return Response.json({errcode:calls===1?45009:0})}};
+    await drainSubscriptions(store,options);subscriptions.updateShareConfig(bot.id,{days:30});
+    store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=0').run();await drainSubscriptions(store,options);
+    assert.equal(bodies[0],bodies[1]);assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM meeting_shares').get().n,1);
+  }finally{store.close()}
+});
+
+test('share and payload persistence roll back atomically',async()=>{
+  for(const trigger of [
+    "CREATE TRIGGER fail_share BEFORE INSERT ON meeting_shares BEGIN SELECT RAISE(ABORT,'blocked'); END",
+    "CREATE TRIGGER fail_payload BEFORE UPDATE OF payload_json ON subscription_deliveries WHEN NEW.payload_json IS NOT NULL BEGIN SELECT RAISE(ABORT,'blocked'); END"
+  ]){
+    const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+    try{
+      subscriptions.createWecom({name:'群',callbackUrl:url,now:1});wecomCompletedMeeting(store);store.db.exec(trigger);
+      await assert.rejects(()=>drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1000,fetchImpl:async()=>Response.json({errcode:0})}));
+      assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM meeting_shares').get().n,0);
+      assert.equal(store.db.prepare('SELECT payload_json FROM subscription_deliveries').get().payload_json,null);
+    }finally{store.close()}
+  }
 });

@@ -132,3 +132,31 @@ test('administrator configures shares at approval and updates them for future de
     assert.equal(invalid.status, 400);
   } finally { store.close(); }
 });
+
+
+test('ordinary retries reuse identical body and link after configuration changes',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const {id}=subscriptions.apply('service','https://subscriber.example/hooks');subscriptions.review(id,true);completedMeeting(store);
+    const bodies=[];let now=1000;
+    const options={baseUrl:'https://example.com',now:()=>now,fetchImpl:async(_url,request)=>{bodies.push(request.body);return new Response(null,{status:bodies.length===1?503:200})}};
+    await drainSubscriptions(store,options);subscriptions.updateShareConfig(id,{days:30});
+    store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=0').run();await drainSubscriptions(store,options);
+    assert.equal(bodies[0],bodies[1]);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM meeting_shares').get().n,1);
+    assert.equal(store.db.prepare('SELECT payload_json FROM subscription_deliveries').get().payload_json,null);
+  }finally{store.close()}
+});
+
+test('expiry during retry becomes terminal without another upstream attempt',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const {id}=subscriptions.apply('service','https://subscriber.example/hooks');subscriptions.review(id,true);completedMeeting(store);
+    let now=1000,calls=0;
+    const options={baseUrl:'https://example.com',now:()=>now,fetchImpl:async()=>{calls++;return new Response(null,{status:503})}};
+    await drainSubscriptions(store,options);now+=8*86400;
+    store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=0').run();await drainSubscriptions(store,options);
+    const row=store.db.prepare('SELECT attempts,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+    assert.equal(calls,1);assert.equal(row.attempts,1);assert.equal(row.last_error,'share_expired');assert.ok(row.failed_at);assert.equal(row.payload_json,null);
+  }finally{store.close()}
+});
