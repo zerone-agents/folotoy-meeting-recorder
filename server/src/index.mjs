@@ -41,7 +41,8 @@ const host=await createRuntime(config,{configDir:process.cwd()});
 registerMinutesAgent(host,{apiKey,model:minutesModel});
 const activeWork=new Map(),asrProgress=new Map();
 const shutdown=new AbortController();
-host.app.route('/meeting-service',createMeetingRouter(store,{adminToken:admin,adminId:process.env.MEETING_ADMIN_ID??'local-admin',retentionSeconds,workerConcurrency,timeKeys,onDelete:id=>activeWork.get(id)?.abort(),getAsrProgress:id=>asrProgress.get(id)??null}));
+const meetingPublicBaseUrl=process.env.MEETING_PUBLIC_BASE_URL??null;
+host.app.route('/meeting-service',createMeetingRouter(store,{adminToken:admin,adminId:process.env.MEETING_ADMIN_ID??'local-admin',retentionSeconds,workerConcurrency,timeKeys,publicBaseUrl:meetingPublicBaseUrl,onDelete:id=>activeWork.get(id)?.abort(),getAsrProgress:id=>asrProgress.get(id)??null}));
 await host.start();
 const adapters={activeWork,asrProgress,shutdownSignal:shutdown.signal,asr:(audio,{signal,onDelta,durationSeconds})=>transcribeTimed(audio,{apiKey,signal,onDelta,durationSeconds}),minutes:createRuntimeMinutes(host,runtimeKey,{cacheScope:`${minutesModel}:prompt-v1`})};
 let stopping=false;
@@ -50,6 +51,6 @@ let server;
 try{server=serve({fetch:publicFetch,hostname:config.server.host,port:config.server.port,...(httpMode?{}:{createServer,serverOptions:{key,cert}})});await waitForListening(server)}catch(error){await host.stop();store.close();serviceLock.close();throw error}
 server.headersTimeout=15000;server.requestTimeout=30000;server.keepAliveTimeout=5000;
 const address=server.address();console.log(`meeting service listening on ${address.address}:${address.port}`);
-const stopMaintenance=startMaintenance(store,{retentionSeconds,onError:code=>console.error(code)});const stopTimeMaintenance=startTimeMaintenance(timeKeys,{onError:code=>console.error(code)});const stopWorkers=startWorkerPool(store,adapters,{limit:workerConcurrency,onError:code=>console.error(code)});const stopSubscriptions=startSubscriptionWorker(store,{baseUrl:process.env.MEETING_PUBLIC_BASE_URL??null,onError:code=>console.error(code)});
+const stopMaintenance=startMaintenance(store,{retentionSeconds,onError:code=>console.error(code)});const stopTimeMaintenance=startTimeMaintenance(timeKeys,{onError:code=>console.error(code)});const stopWorkers=startWorkerPool(store,adapters,{limit:workerConcurrency,onError:code=>console.error(code)});const stopSubscriptions=startSubscriptionWorker(store,{baseUrl:meetingPublicBaseUrl,onError:code=>console.error(code)});
 async function stop(){if(stopping)return;stopping=true;stopMaintenance();stopTimeMaintenance();shutdown.abort();for(const controller of activeWork.values())controller.abort();const closing=new Promise(r=>server.close(r));const force=setTimeout(()=>{publicFetch.abortAll();server.closeAllConnections()},10000);await closing;clearTimeout(force);publicFetch.abortAll();await publicFetch.waitForIdle();await stopWorkers();await stopSubscriptions();await host.stop();store.close();serviceLock.close()}
 process.once('SIGTERM',()=>void stop());process.once('SIGINT',()=>void stop());

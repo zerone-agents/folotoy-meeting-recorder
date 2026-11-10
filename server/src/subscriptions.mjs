@@ -190,6 +190,16 @@ function materializeDelivery(store, row, baseUrl, now) {
   });
 }
 
+async function sendMaterialized(materialized, fetchImpl, timeoutMs) {
+  if (materialized.channel === 'wecom') return sendWecom({ callbackUrl: materialized.callbackUrl, payload: JSON.parse(materialized.body), fetchImpl, timeoutMs });
+  try {
+    const response = await fetchImpl(materialized.callbackUrl, { method: 'POST', headers: materialized.headers, body: materialized.body, signal: AbortSignal.timeout(timeoutMs), redirect: 'error' });
+    return response.ok ? { ok: true } : { ok: false, code: `http_${response.status}`, retryable: response.status === 408 || response.status === 429 || response.status >= 500 };
+  } catch (error) {
+    return { ok: false, code: error?.name === 'AbortError' ? 'timeout' : 'network_error', retryable: true };
+  }
+}
+
 async function deliver(store, baseUrl, row, fetchImpl, timeoutMs, now) {
   const delivery = materializeDelivery(store, row, baseUrl, now());
   if (!delivery) {
@@ -200,21 +210,12 @@ async function deliver(store, baseUrl, row, fetchImpl, timeoutMs, now) {
     store.db.prepare("UPDATE subscription_deliveries SET failed_at=?,last_error='share_expired',payload_json=NULL WHERE event_id=?").run(now(), row.event_id);
     return;
   }
-  let result;
-  if (delivery.channel === 'wecom') {
-    result = await sendWecom({ callbackUrl: delivery.callbackUrl, payload: JSON.parse(delivery.body), fetchImpl, timeoutMs });
-  } else {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const response = await fetchImpl(delivery.callbackUrl, { method: 'POST', headers: delivery.headers, body: delivery.body, signal: controller.signal, redirect: 'error' });
-      result = response.ok ? { ok: true } : { ok: false, code: `http_${response.status}` };
-    } catch (error) {
-      result = { ok: false, code: error?.name === 'AbortError' ? 'timeout' : 'network_error' };
-    } finally { clearTimeout(timer); }
-  }
+  if (delivery.channel === 'wecom' && !reserveWecomSlot(store.db, delivery.callbackUrl, now()).ok) return;
+  const result = await sendMaterialized(delivery, fetchImpl, timeoutMs);
   if (result.ok) {
     store.db.prepare('UPDATE subscription_deliveries SET delivered_at=?,last_error=NULL,payload_json=NULL WHERE event_id=?').run(now(), row.event_id);
+  } else if (!result.retryable) {
+    store.db.prepare('UPDATE subscription_deliveries SET attempts=?,failed_at=?,last_error=?,payload_json=NULL WHERE event_id=?').run(row.attempts + 1, now(), result.code, row.event_id);
   } else {
     const attempts = row.attempts + 1;
     store.db.prepare('UPDATE subscription_deliveries SET attempts=?,next_attempt_at=?+?,last_error=? WHERE event_id=?')

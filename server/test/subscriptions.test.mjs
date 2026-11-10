@@ -160,3 +160,29 @@ test('expiry during retry becomes terminal without another upstream attempt',asy
     assert.equal(calls,1);assert.equal(row.attempts,1);assert.equal(row.last_error,'share_expired');assert.ok(row.failed_at);assert.equal(row.payload_json,null);
   }finally{store.close()}
 });
+
+
+test('ordinary webhook terminal responses stop retries and clear payload',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const {id}=subscriptions.apply('service','https://subscriber.example/hooks');subscriptions.review(id,true);completedMeeting(store);
+    let calls=0;
+    await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1000,fetchImpl:async()=>{calls++;return new Response(null,{status:400})}});
+    store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=0').run();
+    await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1004,fetchImpl:async()=>{calls++;return new Response(null,{status:204})}});
+    const row=store.db.prepare('SELECT attempts,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+    assert.equal(calls,1);assert.equal(row.attempts,1);assert.equal(row.last_error,'http_400');assert.ok(row.failed_at);assert.equal(row.payload_json,null);
+  }finally{store.close()}
+});
+
+test('ordinary webhook thrown errors use safe retryable classifications',async()=>{
+  for(const [error,code] of [[new Error('raw detail'),'network_error'],[new DOMException('aborted','AbortError'),'timeout']]){
+    const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+    try{
+      const {id}=subscriptions.apply('service','https://subscriber.example/hooks');subscriptions.review(id,true);completedMeeting(store);
+      await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1000,fetchImpl:async()=>{throw error}});
+      const row=store.db.prepare('SELECT attempts,next_attempt_at,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+      assert.equal(row.attempts,1);assert.equal(row.next_attempt_at,1005);assert.equal(row.failed_at,null);assert.equal(row.last_error,code);assert.equal(typeof row.payload_json,'string');
+    }finally{store.close()}
+  }
+});

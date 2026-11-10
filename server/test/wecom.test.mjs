@@ -6,7 +6,7 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MeetingStore} from '../src/store.mjs';
-import {SubscriptionStore,initializeSubscriptions,reserveWecomSlot,drainSubscriptions,queueSubscriptionDeliveries} from '../src/subscriptions.mjs';
+import {SubscriptionStore,initializeSubscriptions,reserveWecomSlot,testWecom,drainSubscriptions,queueSubscriptionDeliveries} from '../src/subscriptions.mjs';
 import {createMeetingRouter} from '../src/routes.mjs';
 
 const key='a'.repeat(16);
@@ -211,4 +211,54 @@ test('share and payload persistence roll back atomically',async()=>{
       assert.equal(store.db.prepare('SELECT payload_json FROM subscription_deliveries').get().payload_json,null);
     }finally{store.close()}
   }
+});
+
+
+test('WeCom terminal errors stop retries and clear secrets',async()=>{
+  const terminal=[93000,93001,93004,93006,93008,93019,93017,99999];
+  for(const errcode of terminal){
+    const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+    try{
+      subscriptions.createWecom({name:'群',callbackUrl:url,now:1});wecomCompletedMeeting(store);
+      let calls=0;
+      await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1000,fetchImpl:async()=>{calls++;return Response.json({errcode,errmsg:'raw secret'})}});
+      store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=0').run();
+      await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1004,fetchImpl:async()=>{calls++;return Response.json({errcode:0})}});
+      const row=store.db.prepare('SELECT attempts,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+      assert.equal(calls,1);assert.equal(row.attempts,1);assert.equal(row.last_error,`wecom_${errcode}`);assert.ok(row.failed_at);assert.equal(row.payload_json,null);
+    }finally{store.close()}
+  }
+});
+
+test('WeCom retryable errors retain frozen payload and exponential backoff',async()=>{
+  const cases=[
+    [async()=>Response.json({errcode:45009}),'wecom_45009'],
+    [async()=>{throw new Error('raw detail')},'network_error'],
+    [async()=>{throw new DOMException('aborted','AbortError')},'timeout'],
+    ...[408,429,500,503].map(status=>[async()=>new Response(null,{status}),`http_${status}`])
+  ];
+  for(const [fetchImpl,code] of cases){
+    const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+    try{
+      subscriptions.createWecom({name:'群',callbackUrl:url,now:1});wecomCompletedMeeting(store);
+      await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1000,fetchImpl});
+      const row=store.db.prepare('SELECT attempts,next_attempt_at,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+      assert.equal(row.attempts,1);assert.equal(row.next_attempt_at,1005);assert.equal(row.failed_at,null);assert.equal(row.last_error,code);assert.equal(typeof row.payload_json,'string');
+    }finally{store.close()}
+  }
+});
+
+test('formal delivery and test delivery consume the same rate slot',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    subscriptions.createWecom({name:'群',callbackUrl:url,now:1});wecomCompletedMeeting(store);
+    await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1000,fetchImpl:async()=>Response.json({errcode:0})});
+    const limited=await testWecom({db:store.db,callbackUrl:url,baseUrl:'https://example.com',now:1001,fetchImpl:async()=>Response.json({errcode:0})});
+    assert.equal(limited.status,429);
+    subscriptions.createWecom({name:'同机器人重复订阅',callbackUrl:url,now:1});wecomCompletedMeeting(store,'second');
+    const tested=await testWecom({db:store.db,callbackUrl:url,baseUrl:'https://example.com',now:1004,fetchImpl:async()=>Response.json({errcode:0})});
+    assert.equal(tested.status,200);
+    await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1005,fetchImpl:async()=>Response.json({errcode:0})});
+    assert.equal(store.db.prepare("SELECT attempts FROM subscription_deliveries WHERE meeting_id='second'").get().attempts,0);
+  }finally{store.close()}
 });
