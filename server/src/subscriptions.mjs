@@ -1,5 +1,5 @@
-import { randomUUID } from 'node:crypto';
-import { validateWecomWebhook } from './wecom.mjs';
+import { createHash, randomUUID } from 'node:crypto';
+import { buildWecomTestCard, sendWecom, validateWecomWebhook } from './wecom.mjs';
 
 const validUrl = (value, allowLocalHttp = true) => {
   if (typeof value !== 'string' || value.length > 2048) return null;
@@ -16,6 +16,36 @@ export function publicBaseUrl(value) {
   const normalized = validUrl(value, true);
   if (!normalized || new URL(normalized).search) throw new Error('invalid_public_base_url');
   return normalized.replace(/\/$/, '');
+}
+
+export function reserveWecomSlot(db, callbackUrl, now) {
+  if (!Number.isSafeInteger(now) || now < 0) throw new Error('invalid');
+  const digest = createHash('sha256').update(callbackUrl).digest('hex');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const current = db.prepare('SELECT next_allowed_at FROM wecom_rate_limits WHERE webhook_hash=?').get(digest)?.next_allowed_at ?? 0;
+    if (now < current) {
+      db.exec('COMMIT');
+      return { ok: false, retryAt: current };
+    }
+    db.prepare('INSERT INTO wecom_rate_limits(webhook_hash,next_allowed_at) VALUES(?,?) ON CONFLICT(webhook_hash) DO UPDATE SET next_allowed_at=excluded.next_allowed_at').run(digest, now + 3);
+    db.exec('COMMIT');
+    return { ok: true, reservedAt: now };
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch {}
+    throw error;
+  }
+}
+
+export async function testWecom({ db, callbackUrl, baseUrl, fetchImpl = fetch, now = Math.floor(Date.now() / 1000) }) {
+  let normalized;
+  try { normalized = validateWecomWebhook(callbackUrl); } catch { return { status: 400, body: { ok: false, error: 'invalid' } }; }
+  let normalizedBaseUrl;
+  try { normalizedBaseUrl = publicBaseUrl(baseUrl); } catch { return { status: 400, body: { ok: false, error: 'invalid' } }; }
+  const slot = reserveWecomSlot(db, normalized, now);
+  if (!slot.ok) return { status: 429, body: { ok: false, error: 'rate_limited' } };
+  const result = await sendWecom({ callbackUrl: normalized, payload: buildWecomTestCard({ baseUrl: normalizedBaseUrl }), fetchImpl });
+  return result.ok ? { status: 200, body: { ok: true } } : { status: 502, body: { ok: false, error: result.code } };
 }
 
 const shareConfig = ({ days = 7, includeTranscript = false, allowDownload = false } = {}) => {

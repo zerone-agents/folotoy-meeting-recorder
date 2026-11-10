@@ -6,9 +6,12 @@ import {mkdtempSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MeetingStore} from '../src/store.mjs';
-import {SubscriptionStore,initializeSubscriptions} from '../src/subscriptions.mjs';
+import {SubscriptionStore,initializeSubscriptions,reserveWecomSlot} from '../src/subscriptions.mjs';
+import {createMeetingRouter} from '../src/routes.mjs';
 
 const key='a'.repeat(16);
+const adminHeaders={authorization:'Bearer admin123','content-type':'application/json'};
+const post=(app,path,body,headers=adminHeaders)=>app.request(path,{method:'POST',headers,body:JSON.stringify(body)});
 const url=`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${key}`;
 
 test('WeCom webhook accepts only the canonical endpoint and key',()=>{
@@ -122,3 +125,56 @@ function subscriptionsColumns(db){
   const columns=new Set(db.prepare('PRAGMA table_info(subscription_deliveries)').all().map(column=>column.name));
   return ['payload_json','share_expires_at','failed_at'].filter(column=>columns.has(column));
 }
+
+test('administrator creates WeCom and tests saved or unsaved bots without shares',async()=>{
+  const store=new MeetingStore(':memory:');let calls=[];
+  try{
+    const app=createMeetingRouter(store,{adminToken:'admin123',subscriptionFetchImpl:async(_url,options)=>{calls.push(JSON.parse(options.body));return Response.json({errcode:0})},publicBaseUrl:'https://meetings.example/meeting-service'});
+    assert.equal((await post(app,'/admin/subscriptions/wecom',{name:'群',callbackUrl:url})).status,201);
+    assert.equal((await app.request('/admin/subscriptions/wecom',{method:'POST',headers:{'content-type':'application/json'},body:'{}'})).status,401);
+    const listed=await(await app.request('/admin/subscriptions',{headers:{authorization:'Bearer admin123'}})).json();
+    assert.equal((await post(app,'/admin/subscriptions/wecom/test',{callbackUrl:url})).status,200);
+    store.db.prepare('DELETE FROM wecom_rate_limits').run();
+    assert.equal((await post(app,`/admin/subscriptions/${listed.subscriptions[0].id}/test`,{})).status,200);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM meeting_shares').get().n,0);
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM subscription_deliveries').get().n,0);
+    assert.equal(calls.length,2);
+    assert.equal(calls.every(card=>card.template_card.main_title.title==='企业微信机器人测试消息'),true);
+  }finally{store.close()}
+});
+
+test('test endpoint reports validation, limits and safe upstream errors',async()=>{
+  const store=new MeetingStore(':memory:');
+  try{
+    const app=createMeetingRouter(store,{adminToken:'admin123',subscriptionFetchImpl:async()=>Response.json({errcode:93000,errmsg:'do not expose'}),publicBaseUrl:'https://example.com'});
+    assert.equal((await post(app,'/admin/subscriptions/wecom/test',{callbackUrl:'https://evil.example/?key='+key})).status,400);
+    const failed=await post(app,'/admin/subscriptions/wecom/test',{callbackUrl:url});
+    assert.equal(failed.status,502);assert.deepEqual(await failed.json(),{ok:false,error:'wecom_93000'});
+    const limited=await post(app,'/admin/subscriptions/wecom/test',{callbackUrl:url});
+    assert.equal(limited.status,429);assert.deepEqual(await limited.json(),{ok:false,error:'rate_limited'});
+  }finally{store.close()}
+});
+
+test('missing public base URL is rejected before reserving a rate slot',async()=>{
+  const store=new MeetingStore(':memory:');let calls=0;
+  try{
+    const app=createMeetingRouter(store,{adminToken:'admin123',subscriptionFetchImpl:async()=>{calls++;return Response.json({errcode:0})}});
+    const response=await post(app,'/admin/subscriptions/wecom/test',{callbackUrl:url});
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{ok:false,error:'invalid'});
+    assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM wecom_rate_limits').get().n,0);
+    assert.equal(calls,0);
+  }finally{store.close()}
+});
+
+test('rate slots persist across restart and the twenty-first send waits',()=>{
+  const directory=mkdtempSync(join(tmpdir(),'wecom-rate-')),path=join(directory,'rate.sqlite');
+  let store=new MeetingStore(path);
+  try{
+    assert.deepEqual(reserveWecomSlot(store.db,url,1000),{ok:true,reservedAt:1000});
+    store.close();store=new MeetingStore(path);
+    assert.deepEqual(reserveWecomSlot(store.db,url,1001),{ok:false,retryAt:1003});
+    for(let now=1003;now<=1057;now+=3)assert.equal(reserveWecomSlot(store.db,url,now).ok,true);
+    assert.deepEqual(reserveWecomSlot(store.db,url,1059),{ok:false,retryAt:1060});
+    assert.deepEqual(reserveWecomSlot(store.db,url,1060),{ok:true,reservedAt:1060});
+  }finally{store.close();rmSync(directory,{recursive:true,force:true})}
+});
