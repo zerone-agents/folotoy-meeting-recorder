@@ -1,4 +1,4 @@
-import {test} from 'node:test';import {DatabaseSync} from 'node:sqlite';import {strict as a} from 'node:assert';import {mkdtempSync,rmSync,existsSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';import {createHash} from 'node:crypto';import {MeetingStore} from '../src/store.mjs';import {restoreDatabase} from '../src/restore.mjs';
+import {test} from 'node:test';import {DatabaseSync} from 'node:sqlite';import {strict as a} from 'node:assert';import {mkdtempSync,rmSync,existsSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';import {createHash} from 'node:crypto';import {MeetingStore} from '../src/store.mjs';import {restoreDatabase} from '../src/restore.mjs';import {backupDatabase} from '../src/backup.mjs';import {SubscriptionStore,reserveWecomSlot} from '../src/subscriptions.mjs';import {readSubscriptionSnapshot} from '../src/subscription-restore.mjs';
 const digest=x=>createHash('sha256').update(x).digest('hex');
 test('offline restore applies newer tombstones and revocations before opening to clients',()=>{
  const dir=mkdtempSync(join(tmpdir(),'meeting-restore-')),live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out');
@@ -72,5 +72,57 @@ test('restore uses latest review state rather than resurrecting an older review'
   const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),audio=Buffer.from('audio');let s=new MeetingStore(live);
   s.create('d','m');s.put('d','m',0,audio,digest(audio));s.finalize('d','m',{count:1,bytes:audio.length,digest:digest(audio),reason:'user'});s.publish(s.claim('m','queued'),JSON.stringify({versionId:'v',segments:[{id:'s0',text:'transcript'}]}));const minutes=JSON.stringify({summary:'minutes'});s.publish(s.claim('m','minutes_queued'),minutes);s.markReviewed('m',s.adminGet('m').reviewKey);s.db.prepare('VACUUM INTO ?').run(backup);
   s.db.prepare('DELETE FROM meeting_reviews WHERE meeting_id=?').run('m');s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);a.equal(s.adminGet('m').reviewed,false);s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+test('restore reconciles subscriptions, frozen retries, terminal events and rate slots from latest safety',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-subscription-restore-'));
+ try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out');let s=new MeetingStore(live);const subscriptions=new SubscriptionStore(s.db),url='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=dddddddddddddddd';
+  for(const id of ['m','deleted','cancelled'])s.create('d',id);
+  const revoked=subscriptions.createWecom({name:'旧群',callbackUrl:url,now:1});
+  s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at) VALUES('old-deleted',?,'deleted',0,1),('old-cancelled',?,'cancelled',0,1)").run(revoked.id,revoked.id);
+  backupDatabase({sourcePath:live,outputPath:backup});
+  subscriptions.revoke(revoked.id,2);
+  const addedUrl='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=eeeeeeeeeeeeeeee',added=subscriptions.createWecom({name:'新群',callbackUrl:addedUrl,days:14,includeTranscript:true,now:3});
+  const frozen=JSON.stringify({headers:{'content-type':'application/json'},body:'{"shareUrl":"https://example.test/share#frozen-secret"}'});
+  const insert=s.db.prepare('INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,next_attempt_at,created_at,delivered_at,last_error,payload_json,share_expires_at,failed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)');
+  insert.run('retry',added.id,'m',0,2,88,4,null,'timeout',frozen,999,null);
+  insert.run('delivered',added.id,'m',1,1,0,5,6,null,null,999,null);
+  insert.run('terminal',added.id,'m',2,3,0,7,null,'http_400',null,999,8);
+  s.db.prepare("DELETE FROM subscription_deliveries WHERE event_id IN ('old-deleted','old-cancelled')").run();
+  s.adminDelete('deleted');s.cancel('d','cancelled');reserveWecomSlot(s.db,url,20);reserveWecomSlot(s.db,addedUrl,40);
+  const expected=readSubscriptionSnapshot(s.db);s.close();
+  restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);
+  a.equal(s.db.prepare('SELECT status FROM meeting_subscriptions WHERE id=?').get(revoked.id).status,'revoked');
+  a.equal(s.db.prepare('SELECT name FROM meeting_subscriptions WHERE id=?').get(added.id).name,'新群');
+  a.deepEqual(readSubscriptionSnapshot(s.db),expected);
+  a.equal(s.db.prepare("SELECT payload_json FROM subscription_deliveries WHERE event_id='retry'").get().payload_json,frozen);
+  a.equal(s.db.prepare("SELECT attempts FROM subscription_deliveries WHERE event_id='retry'").get().attempts,2);
+  a.equal(s.db.prepare("SELECT next_attempt_at FROM subscription_deliveries WHERE event_id='retry'").get().next_attempt_at,88);
+  a.equal(s.db.prepare("SELECT payload_json FROM subscription_deliveries WHERE event_id='delivered'").get().payload_json,null);
+  a.equal(s.db.prepare("SELECT payload_json FROM subscription_deliveries WHERE event_id='terminal'").get().payload_json,null);
+  a.equal(s.db.prepare("SELECT COUNT(*) AS n FROM subscription_deliveries WHERE event_id IN ('old-deleted','old-cancelled')").get().n,0);
+  a.equal(s.db.prepare("SELECT COUNT(*) AS n FROM subscription_deliveries WHERE meeting_id IN ('deleted','cancelled') AND delivered_at IS NULL AND failed_at IS NULL").get().n,0);
+  a.deepEqual(s.db.prepare('SELECT webhook_hash,next_allowed_at FROM wecom_rate_limits ORDER BY webhook_hash').all(),expected.rateLimits);
+  s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+const corruptSubscriptionCases=[
+ ['bad channel',(s,bot)=>{s.db.exec('PRAGMA ignore_check_constraints=ON');s.db.prepare("UPDATE meeting_subscriptions SET channel='broken' WHERE id=?").run(bot.id)}],
+ ['invalid status',(s,bot)=>{s.db.exec('PRAGMA ignore_check_constraints=ON');s.db.prepare("UPDATE meeting_subscriptions SET status='unknown' WHERE id=?").run(bot.id)}],
+ ['invalid timestamps',(s,bot)=>{s.db.prepare('UPDATE meeting_subscriptions SET created_at=-1 WHERE id=?').run(bot.id)}],
+ ['malformed payload JSON',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at) VALUES('event',?,'m',0,1,'not-json',9)").run(bot.id)}],
+ ['terminal row with payload',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at,failed_at) VALUES('event',?,'m',0,1,'{}',9,2)").run(bot.id)}],
+ ['delivered row with payload',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at,delivered_at) VALUES('event',?,'m',0,1,'{}',9,2)").run(bot.id)}],
+ ['foreign-key violation',(s,bot)=>{s.db.exec('PRAGMA foreign_keys=OFF');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at) VALUES('event',?,'missing',0,1)").run(bot.id)}]
+];
+for(const [name,corrupt] of corruptSubscriptionCases)test(`restore rejects ${name} without leaking secrets or leaving output`,()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-subscription-corrupt-'));
+ try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),secret='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=ffffffffffffffff';let s=new MeetingStore(live);s.db.prepare('VACUUM INTO ?').run(backup);const bot=new SubscriptionStore(s.db).createWecom({name:'secret subscription',callbackUrl:secret,now:1});corrupt(s,bot);s.close();
+  a.throws(()=>restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out}),error=>{a.equal(error.message,'invalid_subscription_state');a.equal(error.message.includes(secret),false);a.equal(error.message.includes(bot.id),false);return true});
+  a.equal(existsSync(out),false);
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
