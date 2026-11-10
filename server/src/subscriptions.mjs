@@ -49,10 +49,13 @@ export function initializeSubscriptions(db) {
   if (!columns.has('share_days')) db.exec('ALTER TABLE meeting_subscriptions ADD COLUMN share_days INTEGER NOT NULL DEFAULT 7 CHECK(share_days BETWEEN 1 AND 365)');
   if (!columns.has('include_transcript')) db.exec('ALTER TABLE meeting_subscriptions ADD COLUMN include_transcript INTEGER NOT NULL DEFAULT 0 CHECK(include_transcript IN (0,1))');
   if (!columns.has('allow_download')) db.exec('ALTER TABLE meeting_subscriptions ADD COLUMN allow_download INTEGER NOT NULL DEFAULT 0 CHECK(allow_download IN (0,1))');
-  const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_subscriptions'").get();
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='meeting_subscriptions'").get();
   const marker = db.prepare("SELECT value FROM service_metadata WHERE key='subscription_schema'").get()?.value;
   const subscriptionColumns = () => new Set(db.prepare('PRAGMA table_info(meeting_subscriptions)').all().map(column => column.name));
-  if (table && marker === '1' && !subscriptionColumns().has('channel')) throw new Error('invalid_subscription_state');
+  const expectedChannel = "channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))".replace(/\s+/g, '');
+  const validChannelDefinition = table?.sql?.replace(/\s+/g, '').includes(expectedChannel);
+  if (table && marker === '1' && (!subscriptionColumns().has('channel') || !validChannelDefinition ||
+      db.prepare("SELECT 1 FROM meeting_subscriptions WHERE channel IS NULL OR channel NOT IN ('webhook','wecom') LIMIT 1").get())) throw new Error('invalid_subscription_state');
   if (marker !== undefined && marker !== '1') throw new Error('invalid_subscription_state');
   if (!subscriptionColumns().has('channel')) db.exec("ALTER TABLE meeting_subscriptions ADD COLUMN channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))");
   db.exec(`CREATE TABLE IF NOT EXISTS wecom_rate_limits(webhook_hash TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL CHECK(next_allowed_at>=0));
