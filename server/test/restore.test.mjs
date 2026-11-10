@@ -109,10 +109,28 @@ test('restore reconciles subscriptions, frozen retries, terminal events and rate
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
 
+test('restore clears subscriptions from an unsanitized legacy backup when safety lacks schema',()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-subscription-legacy-null-'));
+ try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),s=new MeetingStore(live),subscriptions=new SubscriptionStore(s.db);
+  s.create('d','m');const bot=subscriptions.createWecom({name:'legacy',callbackUrl:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=gggggggggggggggg',now:1});
+  s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at) VALUES('legacy-event',?,'m',0,1)").run(bot.id);
+  s.db.prepare('INSERT INTO wecom_rate_limits(webhook_hash,next_allowed_at) VALUES(?,?)').run('b'.repeat(64),2);
+  s.db.prepare('VACUUM INTO ?').run(backup);
+  s.db.exec("DELETE FROM subscription_deliveries; DELETE FROM wecom_rate_limits; DELETE FROM meeting_subscriptions; DELETE FROM service_metadata WHERE key='subscription_schema'");s.close();
+  restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});const restored=new MeetingStore(out);
+  for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])a.equal(restored.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0);
+  restored.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
 const corruptSubscriptionCases=[
  ['bad channel',(s,bot)=>{s.db.exec('PRAGMA ignore_check_constraints=ON');s.db.prepare("UPDATE meeting_subscriptions SET channel='broken' WHERE id=?").run(bot.id)}],
  ['invalid status',(s,bot)=>{s.db.exec('PRAGMA ignore_check_constraints=ON');s.db.prepare("UPDATE meeting_subscriptions SET status='unknown' WHERE id=?").run(bot.id)}],
  ['invalid timestamps',(s,bot)=>{s.db.prepare('UPDATE meeting_subscriptions SET created_at=-1 WHERE id=?').run(bot.id)}],
+ ['invalid reviewed_at',(s,bot)=>{s.db.prepare('UPDATE meeting_subscriptions SET reviewed_at=-1 WHERE id=?').run(bot.id)}],
+ ['invalid share_expires_at without payload',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,share_expires_at) VALUES('event',?,'m',0,1,-1)").run(bot.id)}],
+ ['array payload headers',(s,bot)=>{s.create('d','m');s.db.prepare('INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at) VALUES(?,?,?,?,?,?,?)').run('event',bot.id,'m',0,1,'{"headers":[],"body":"{}"}',9)}],
  ['malformed payload JSON',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at) VALUES('event',?,'m',0,1,'not-json',9)").run(bot.id)}],
  ['terminal row with payload',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at,failed_at) VALUES('event',?,'m',0,1,'{}',9,2)").run(bot.id)}],
  ['delivered row with payload',(s,bot)=>{s.create('d','m');s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at,delivered_at) VALUES('event',?,'m',0,1,'{}',9,2)").run(bot.id)}],

@@ -45,11 +45,13 @@ test('missing subscription schema restores no subscriptions and corrupt channel 
  }finally{store.close()}
 });
 
-test('null snapshot clears no existing subscription state',()=>{
+test('null snapshot clears all existing subscription state',()=>{
  const target=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(target.db);
  try{
-  const bot=subscriptions.createWecom({name:'群',callbackUrl:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=cccccccccccccccc',now:1});
+  target.create('d','m');const bot=subscriptions.createWecom({name:'群',callbackUrl:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=cccccccccccccccc',now:1});
+  target.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at) VALUES('event',?,'m',0,1)").run(bot.id);
+  target.db.prepare('INSERT INTO wecom_rate_limits(webhook_hash,next_allowed_at) VALUES(?,?)').run('a'.repeat(64),2);
   restoreSubscriptionSnapshot(target.db,null);
-  assert.equal(target.db.prepare('SELECT COUNT(*) AS n FROM meeting_subscriptions WHERE id=?').get(bot.id).n,1);
+  for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])assert.equal(target.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0);
  }finally{target.close()}
 });
