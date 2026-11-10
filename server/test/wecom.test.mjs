@@ -7,7 +7,7 @@ const url=`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${key}`;
 
 test('WeCom webhook accepts only the canonical endpoint and key',()=>{
   assert.equal(validateWecomWebhook(url),url);
-  for(const value of [null,url.replace('https:','http:'),url.replace('qyapi.weixin.qq.com','evil.example'),url.replace('/cgi-bin/webhook/send','/other'),url+'&debug=1',url+'#x',url.replace('https://','https://user@'),url.replace(key,'short')])assert.throws(()=>validateWecomWebhook(value),/invalid/);
+  for(const value of [null,url.replace('https:','http:'),url.replace('qyapi.weixin.qq.com','evil.example'),url.replace('/cgi-bin/webhook/send','/other'),url+'&debug=1',url+'#x',url.replace('https://','https://user@'),url.replace('qyapi.weixin.qq.com','qyapi.weixin.qq.com:443'),url.replace(key,'short')])assert.throws(()=>validateWecomWebhook(value),/invalid/);
 });
 
 test('meeting title removes controls, falls back and truncates by code point',()=>{

@@ -2,7 +2,8 @@ export function validateWecomWebhook(value){
   if(typeof value!=='string'||value.length>2048)throw new Error('invalid');
   let url;try{url=new URL(value)}catch{throw new Error('invalid')}
   const keys=[...url.searchParams.keys()];
-  if(url.protocol!=='https:'||url.hostname!=='qyapi.weixin.qq.com'||url.pathname!=='/cgi-bin/webhook/send'||url.username||url.password||url.hash||url.port||keys.length!==1||keys[0]!=='key'||!/^[A-Za-z0-9_-]{16,128}$/.test(url.searchParams.get('key')??''))throw new Error('invalid');
+  const authority=/^[A-Za-z][A-Za-z\d+.-]*:\/\/([^\/?#]*)/.exec(value.trim())?.[1]??'';
+  if(url.protocol!=='https:'||url.hostname!=='qyapi.weixin.qq.com'||url.pathname!=='/cgi-bin/webhook/send'||authority.includes(':')||url.username||url.password||url.hash||url.port||keys.length!==1||keys[0]!=='key'||!/^[A-Za-z0-9_-]{16,128}$/.test(url.searchParams.get('key')??''))throw new Error('invalid');
   return url.toString();
 }
 
