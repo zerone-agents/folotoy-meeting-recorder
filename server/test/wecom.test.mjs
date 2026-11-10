@@ -79,6 +79,17 @@ test('marked schema rejects a corrupt channel definition',()=>{
   }finally{db.close()}
 });
 
+test('marked schema rejects a constrained lookalike archived_channel declaration',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    db.exec(`CREATE TABLE service_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE meetings(id TEXT PRIMARY KEY);
+      CREATE TABLE meeting_subscriptions(id TEXT PRIMARY KEY,name TEXT NOT NULL,callback_url TEXT NOT NULL,callback_token TEXT,status TEXT NOT NULL,created_at INTEGER NOT NULL,reviewed_at INTEGER,share_days INTEGER NOT NULL DEFAULT 7,include_transcript INTEGER NOT NULL DEFAULT 0,allow_download INTEGER NOT NULL DEFAULT 0,channel TEXT,archived_channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom')));
+      INSERT INTO service_metadata VALUES('subscription_schema','1');`);
+    assert.throws(()=>initializeSubscriptions(db),{message:'invalid_subscription_state'});
+  }finally{db.close()}
+});
+
 test('marked schema rejects stored invalid channels before redacted listing',()=>{
   const db=new DatabaseSync(':memory:');
   try{

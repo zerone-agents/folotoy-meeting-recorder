@@ -53,7 +53,8 @@ export function initializeSubscriptions(db) {
   const marker = db.prepare("SELECT value FROM service_metadata WHERE key='subscription_schema'").get()?.value;
   const subscriptionColumns = () => new Set(db.prepare('PRAGMA table_info(meeting_subscriptions)').all().map(column => column.name));
   const expectedChannel = "channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))".replace(/\s+/g, '');
-  const validChannelDefinition = table?.sql?.replace(/\s+/g, '').includes(expectedChannel);
+  const normalizedTableSql = table?.sql?.replace(/\s+/g, '');
+  const validChannelDefinition = ['(', ','].some(prefix => [',', ')'].some(suffix => normalizedTableSql?.includes(`${prefix}${expectedChannel}${suffix}`)));
   if (table && marker === '1' && (!subscriptionColumns().has('channel') || !validChannelDefinition ||
       db.prepare("SELECT 1 FROM meeting_subscriptions WHERE channel IS NULL OR channel NOT IN ('webhook','wecom') LIMIT 1").get())) throw new Error('invalid_subscription_state');
   if (marker !== undefined && marker !== '1') throw new Error('invalid_subscription_state');
