@@ -77,6 +77,33 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
 管理员可向 `POST /admin/meetings/:id/review` 提交详情接口返回的 `reviewKey`，确认当前版本已人工复核；若内容已变化，接口返回 409。复核状态绑定当前逐字稿和纪要，纪要保存或重新转写后需重新复核；分享页只对匹配版本显示已复核。人工编辑无法与当前转写匹配时，须先保存匹配版本才能确认复核。
 
 人工编辑的正文会原样保留，包括与历史系统提示相同的文字。系统无法判断这类文字的来源；若正文包含类似复核状态的独立段落或引用，分享页和下载内容会提示读者以当前系统状态为准，不会静默删除正文。
+
+### 会议纪要订阅
+
+外部服务通过匿名 `POST /subscriptions` 提交 `{ "name": "服务名称", "callbackUrl": "https://subscriber.example/hooks", "callbackToken": "可选的回调令牌" }`，成功返回 HTTP 202 和 `{id,status:"pending"}`。名称最长 100 个字符；回调地址最多 2048 个字符，只允许 HTTPS，开发环境可使用 localhost 的 HTTP，不允许 URL 用户信息或 fragment。回调令牌若提供，须为 16–512 个非空白字符，服务发送回调时放入 `Authorization: Bearer <callbackToken>`。申请接口不会发送测试请求，批准前管理员应确认申请方及回调地址可信。
+
+管理员通过 `GET /admin/subscriptions` 查看申请、状态及分享配置（不返回回调令牌）。调用 `POST /admin/subscriptions/:id/approve` 时可提交 `{ "days": 7, "includeTranscript": false, "allowDownload": false }` 配置分享：有效期为 1–365 整数天，逐字稿和下载默认关闭；空请求体使用默认值。批准后可通过 `PATCH /admin/subscriptions/:id` 修改配置，只需提交要变化的字段，其余保持不变。修改只影响之后生成的链接，已经推送的链接权限和有效期不变。调用 `POST /admin/subscriptions/:id/reject` 或 `POST /admin/subscriptions/:id/revoke` 可拒绝或撤销。只有 pending 可批准或拒绝，只有 approved 可修改配置或撤销，重复或状态不符返回 404。`GET /admin/subscription-deliveries` 返回事件、会议、尝试次数、完成时间及安全错误码，不返回回调令牌或分享凭证。
+
+每次新纪要发布时，服务为当时所有 approved 订阅各创建一个事件；不补发批准前的会议，重新转写完成会创建新事件。后台按该订阅当前配置生成分享链接，然后向回调地址发送 JSON POST：
+
+```json
+{
+  "event": "meeting.minutes.completed",
+  "eventId": "全局唯一事件 ID",
+  "meetingId": "会议 ID",
+  "shareUrl": "https://meetings.example/meeting-service/share#凭证",
+  "shareExpiresAt": 1799999999,
+  "downloadUrls": {
+    "minutes": "https://meetings.example/meeting-service/share/download/minutes",
+    "transcript": "https://meetings.example/meeting-service/share/download/transcript"
+  }
+}
+```
+
+仅当 `allowDownload` 为 true 时包含 `downloadUrls`，同时提供纪要和逐字稿两个下载地址。订阅方需从 `shareUrl` 的 fragment 取出分享令牌，并以 `Authorization: Bearer <token>` 请求下载地址；未启用 `includeTranscript` 时，逐字稿下载地址返回 404。两个下载地址遵循与分享链接相同的权限和有效期。
+
+任意 2xx 均视为送达。非 2xx、网络错误或 10 秒超时会按 5 秒至 5 分钟的指数退避持续重试；回调不得依赖重定向。投递为至少一次语义，接收方必须以 `eventId` 去重，分享链接也应作为敏感凭证保护。撤销订阅或删除会议会取消尚未送达的事件；已经发出的链接和响应无法撤回，会议删除后链接的新访问失效。服务必须配置 `MEETING_PUBLIC_BASE_URL` 为包含 `/meeting-service` 的外部访问前缀，否则不会发送回调。
+
 ## 人工编辑纪要
 
 `PUT /admin/meetings/:id/minutes` 需要管理员认证，JSON 请求含 `markdown`、非负整数 `revision` 和结果接口返回的 `minutesSourceHash`。首次保存使用结果的版本号；服务端在事务中校验版本与当前模型结果，冲突返回 409，成功返回新版本与安全预览标记。人工内容不会覆盖模型结构化结果，结果接口及 Markdown 下载优先返回人工版本；重新处理后若模型结果变化，结果接口的 `minutesEditedStale` 提示人工版本基于旧结果。会议删除会清理当前数据库中的编辑。

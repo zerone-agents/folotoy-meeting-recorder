@@ -6,6 +6,7 @@ import { meetingUi, meetingIcon } from './ui.mjs';
 import { shareUi } from './share-ui.mjs';
 import {renderMinutesMarkdown,minutesForDownload} from './markdown-minutes.mjs';
 import {renderPreview} from './markdown-preview.mjs';
+import {SubscriptionStore} from './subscriptions.mjs';
 const validateUploadedAudio=audio=>{try{validateAudioStructure(audio)}catch(e){if(['invalid_audio','unsupported_audio'].includes(e?.message))throw new StoreError(e.message);throw e}};
 const secureEqual=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
 async function bounded(req,limit){
@@ -23,10 +24,11 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  if(typeof adminId!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(adminId))throw new Error('invalid_admin_id');
  if(typeof adminToken!=='string'||adminToken.length<7||/\s/.test(adminToken))throw new Error('admin_token_required');
  if(!Number.isSafeInteger(maxTimeProofPerMinute)||maxTimeProofPerMinute<1||maxTimeProofPerMinute>1000||typeof timeSeconds!=='function'||typeof timeMonotonic!=='function')throw new Error('invalid_time_proof_options');
- const app=new Hono();const activeDevices=new Map();
+ const app=new Hono();const activeDevices=new Map();const subscriptions=new SubscriptionStore(store.db);
  app.onError((e,c)=>{if(e?.code==='ERR_SQLITE_ERROR'&&Number.isInteger(e.errcode)&&(e.errcode&255)===13)return c.json({error:'storage_full'},507);if(e instanceof StoreError){const status={not_found:404,invalid:400,limit:413,conflict:409,too_many_pending:409,missing_chunks:409,integrity:409,invalid_audio:422,unsupported_audio:422,storage_full:507,request_aborted:408}[e.code]??500;return c.json({error:e.code},status)}return c.json({error:'internal_error'},500)});
  app.use('*',async(c,next)=>{c.header('X-Meeting-Protocol-Version','1');c.header('Cache-Control','no-store');const requested=c.req.header('x-meeting-protocol-version');if(requested!==undefined&&requested!=='1')return c.json({error:'unsupported_protocol_version'},400);await next()});
  app.get('/ui',()=>meetingUi());
+ app.post('/subscriptions',async c=>{const b=await json(c.req.raw);if(!b||Array.isArray(b)||typeof b!=='object'||Object.keys(b).some(k=>!['name','callbackUrl','callbackToken'].includes(k)))throw new StoreError('invalid');try{return c.json(subscriptions.apply(b.name,b.callbackUrl,b.callbackToken??null),202)}catch{throw new StoreError('invalid')}});
  app.get('/share',()=>shareUi());
  app.get('/share/data',c=>{c.header('Referrer-Policy','no-referrer');c.header('X-Content-Type-Options','nosniff');const match=/^Bearer ([A-Za-z0-9_-]{43})$/.exec(c.req.header('authorization')??'');const data=match?store.readShare(match[1]):null;return data?c.json(data.unavailable?data:{...data,minutesHtml:renderPreview(data.minutesMarkdown)}):c.json({error:'not_found'},404)});
  app.get('/favicon.svg',()=>meetingIcon());
@@ -49,6 +51,14 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  app.use('*',async(c,next)=>{const match=/^Bearer ([^\s]+)$/.exec(c.req.header('authorization')??'');if(!match)return c.json({error:'unauthorized'},401);const token=match[1];if(secureEqual(token,adminToken)){c.set('principal',{role:'admin',id:adminId});return next()}const id=store.authenticate(token);if(!id)return c.json({error:'unauthorized'},401);const active=activeDevices.get(id)??0;if(active>=maxDeviceRequests){c.header('Retry-After','1');return c.json({error:'device_busy'},429)}activeDevices.set(id,active+1);c.set('principal',{role:'device',id,token});try{return await next()}finally{const remaining=(activeDevices.get(id)??1)-1;if(remaining)activeDevices.set(id,remaining);else activeDevices.delete(id)}});
  const device=c=>{if(c.req.raw.signal.aborted)throw new StoreError('request_aborted');const p=c.get('principal');if(p.role!=='device'||store.authenticate(p.token)!==p.id)throw new StoreError('not_found');return p.id};
  const admin=c=>{if(c.get('principal').role!=='admin')throw new StoreError('not_found')};
+ const subscriptionAction=(fn,id)=>{try{return fn(id)}catch(e){throw new StoreError(e.message==='not_found'?'not_found':'invalid')}};
+ const subscriptionConfig=body=>{if(!body||Array.isArray(body)||typeof body!=='object'||Object.keys(body).some(k=>!['days','includeTranscript','allowDownload'].includes(k)))throw new StoreError('invalid');return body};
+ app.get('/admin/subscriptions',c=>{admin(c);return c.json({subscriptions:subscriptions.list()})});
+ app.get('/admin/subscription-deliveries',c=>{admin(c);return c.json({deliveries:subscriptions.deliveries()})});
+ app.post('/admin/subscriptions/:id/approve',async c=>{admin(c);const body=c.req.raw.body?subscriptionConfig(await json(c.req.raw)):{};return c.json(subscriptionAction(id=>subscriptions.review(id,true,Math.floor(Date.now()/1000),body),c.req.param('id')))});
+ app.patch('/admin/subscriptions/:id',async c=>{admin(c);const body=subscriptionConfig(await json(c.req.raw));return c.json(subscriptionAction(id=>subscriptions.updateShareConfig(id,body),c.req.param('id')))});
+ app.post('/admin/subscriptions/:id/reject',c=>{admin(c);return c.json(subscriptionAction(id=>subscriptions.review(id,false),c.req.param('id')))});
+ app.post('/admin/subscriptions/:id/revoke',c=>{admin(c);return c.json(subscriptionAction(id=>subscriptions.revoke(id),c.req.param('id')))});
  app.get('/admin/time-signer',c=>{admin(c);if(!timeKeys)return c.json({error:'not_found'},404);const info=timeKeys.getPublic();return info?c.json({origin:info.origin,keyId:info.keyId,publicKey:info.publicKey.toString('hex')}):c.json({error:'not_found'},404)});
  app.post('/admin/time-signer',async c=>{
   admin(c);if(!timeKeys)return c.json({error:'not_found'},404);

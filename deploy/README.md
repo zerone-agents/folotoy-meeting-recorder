@@ -3,7 +3,7 @@
 镜像支持 HTTP 模式和命名 volume 初始化。2026-11 的测试部署已用于有限设备联调；新的部署环境仍需自行验收。服务是单实例 SQLite 应用，不支持多个副本或共享网络文件系统。生产使用前须完成设备联调、安全审计、证书管理及备份策略。
 
 1. Compose 使用 Docker 管理的 `meeting_data` 命名 volume 保存数据库、录音块、WAL 和任务。新 volume 初始化时从镜像复制非 root 用户所有的 0700 目录；已有 volume 必须保证目录由容器内 node 用户拥有且权限为 0700。HTTPS 由反向代理终止。
-2. 启动前通过环境变量提供 `MEETING_ADMIN_TOKEN`（至少 7 个非空白字符）、`ZERONE_AGENT_HTTP_API_KEY`（至少 32 个非空白字符）和 `STEPFUN_API_KEY`；管理员令牌与 Runtime 密钥须不同。Compose 通过 `${变量名}` 引用它们；不要将密钥提交到 Git，Docker 管理员仍可查看容器环境变量。
+2. 启动前通过环境变量提供 `MEETING_ADMIN_TOKEN`（至少 7 个非空白字符）、`ZERONE_AGENT_HTTP_API_KEY`（至少 32 个非空白字符）和 `STEPFUN_API_KEY`；管理员令牌与 Runtime 密钥须不同。Compose 通过 `${变量名}` 引用它们；不要将密钥提交到 Git，Docker 管理员仍可查看容器环境变量。需要订阅推送时，另将 `MEETING_PUBLIC_BASE_URL` 设为外部可访问的完整服务前缀（含 `/meeting-service`）；留空会停用回调发送。
 3. 默认使用 Docker Hub 的 `zeroneai/meeting-recorder:latest`和 Docker 命名 volume。无需手动创建数据目录。该镜像须包含 HTTP 模式；旧版 v0.1.0 不支持。执行 `docker compose config -q`，再执行 `docker compose up -d`。默认仅监听本机 3443；反向代理通过 `http://127.0.0.1:3443` 转发 `/meeting-service/`，对外提供有效 HTTPS 证书。保持本机绑定，不要将明文服务直接暴露到网络。
 4. 通过反向代理，使用受信任 CA 和匹配的主机名访问服务根路径 `/`，服务会跳转到 `/meeting-service/ui`；管理员状态接口需要令牌。停止用 `docker compose stop`，等待任务排水完成。
 
