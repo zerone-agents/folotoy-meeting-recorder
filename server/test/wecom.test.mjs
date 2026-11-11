@@ -2,7 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {validateWecomWebhook,cleanMeetingTitle,buildWecomCard,buildWecomTestCard,sendWecom} from '../src/wecom.mjs';
 import {DatabaseSync} from 'node:sqlite';
-import {mkdtempSync,rmSync} from 'node:fs';
+import {mkdtempSync,readFileSync,rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {MeetingStore} from '../src/store.mjs';
@@ -261,4 +261,13 @@ test('formal delivery and test delivery consume the same rate slot',async()=>{
     await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>1005,fetchImpl:async()=>Response.json({errcode:0})});
     assert.equal(store.db.prepare("SELECT attempts FROM subscription_deliveries WHERE meeting_id='second'").get().attempts,0);
   }finally{store.close()}
+});
+
+test('operator docs include WeCom routes and recovery boundaries',()=>{
+  const api=readFileSync(new URL('../API.md',import.meta.url),'utf8');
+  const backup=readFileSync(new URL('../BACKUP.md',import.meta.url),'utf8');
+  for(const route of ['/admin/subscriptions/wecom','/admin/subscriptions/wecom/test','/admin/subscriptions/:id/test'])assert.ok(api.includes(route));
+  for(const text of ['rate_limited','wecom_45009','share_expired'])assert.ok(api.includes(text));
+  for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])assert.ok(backup.includes(table));
+  assert.match(backup,/最新安全库/);assert.match(backup,/净化/);
 });
