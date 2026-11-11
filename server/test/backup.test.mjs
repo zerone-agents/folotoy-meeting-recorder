@@ -1,4 +1,4 @@
-import {test} from 'node:test';import {strict as a} from 'node:assert';import {createHash} from 'node:crypto';import {mkdtempSync,rmSync,statSync,existsSync,writeFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';import {MeetingStore} from '../src/store.mjs';import {backupDatabase} from '../src/backup.mjs';import {restoreDatabase} from '../src/restore.mjs';
+import {test} from 'node:test';import {DatabaseSync} from 'node:sqlite';import {strict as a} from 'node:assert';import {createHash} from 'node:crypto';import {mkdtempSync,rmSync,statSync,existsSync,writeFileSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';import {MeetingStore} from '../src/store.mjs';import {backupDatabase} from '../src/backup.mjs';import {restoreDatabase} from '../src/restore.mjs';import {SubscriptionStore} from '../src/subscriptions.mjs';
 const hash=x=>createHash('sha256').update(x).digest('hex');
 test('backup captures committed WAL data and works with offline restore',()=>{const dir=mkdtempSync(join(tmpdir(),'meeting-backup-'));try{const live=join(dir,'live'),backup=join(dir,'backup'),restored=join(dir,'restored'),b=Buffer.from('audio');let s=new MeetingStore(live);s.create('d','m');s.put('d','m',0,b,hash(b));s.finalize('d','m',{count:1,bytes:b.length,digest:hash(b),reason:'user'});a.equal(existsSync(live+'-wal'),true);a.deepEqual(backupDatabase({sourcePath:live,outputPath:backup}),{status:'ok'});a.equal(statSync(backup).mode&0o077,0);s.close();restoreDatabase({backupPath:backup,safetyPath:live,outputPath:restored});s=new MeetingStore(restored);a.deepEqual(s.adminAudio('m'),b);s.close();a.throws(()=>backupDatabase({sourcePath:live,outputPath:backup}),/EEXIST/)}finally{rmSync(dir,{recursive:true,force:true})}});
 test('failed snapshot leaves no incomplete output and never overwrites inputs',()=>{const dir=mkdtempSync(join(tmpdir(),'meeting-backup-'));try{const bad=join(dir,'bad'),out=join(dir,'out');writeFileSync(bad,'not a database');a.throws(()=>backupDatabase({sourcePath:bad,outputPath:out}));a.equal(existsSync(out),false);a.throws(()=>backupDatabase({sourcePath:bad,outputPath:bad}),/distinct_paths_required/)}finally{rmSync(dir,{recursive:true,force:true})}});
@@ -7,3 +7,28 @@ test('backup clears data behind a pending deletion before export',()=>{const dir
 test('backup refuses to export if pending deletion cannot be cleaned',()=>{const dir=mkdtempSync(join(tmpdir(),'meeting-backup-'));try{const live=join(dir,'live'),out=join(dir,'out'),s=new MeetingStore(live),b=Buffer.from('private');s.create('d','m');s.put('d','m',0,b,hash(b));s.beginDelete('d','m');s.db.exec("CREATE TRIGGER reject_cleanup BEFORE DELETE ON chunks BEGIN SELECT RAISE(ABORT,'cleanup failed'); END");a.throws(()=>backupDatabase({sourcePath:live,outputPath:out}),/cleanup failed/);a.equal(existsSync(out),false);s.close()}finally{rmSync(dir,{recursive:true,force:true})}});
 test('backup rejects and preserves a pre-existing output sidecar',()=>{const dir=mkdtempSync(join(tmpdir(),'meeting-backup-'));try{const live=join(dir,'live'),out=join(dir,'out'),side=out+'-wal';new MeetingStore(live).close();writeFileSync(side,'preserve');a.throws(()=>backupDatabase({sourcePath:live,outputPath:out}),/output_sidecar_exists/);a.equal(existsSync(out),false);a.equal(existsSync(side),true);a.equal(statSync(side).size,8)}finally{rmSync(dir,{recursive:true,force:true})}});
 test('backup rejects retained data behind a cancelled tombstone',()=>{const dir=mkdtempSync(join(tmpdir(),'meeting-backup-'));try{const live=join(dir,'live'),out=join(dir,'out'),b=Buffer.from('private'),s=new MeetingStore(live);s.cancel('d','m');s.db.prepare('INSERT INTO chunks(meeting_id,seq,digest,data) VALUES(?,?,?,?)').run('m',0,hash(b),b);a.throws(()=>backupDatabase({sourcePath:live,outputPath:out}),/backup_deleted_content/);a.equal(existsSync(out),false);s.close()}finally{rmSync(dir,{recursive:true,force:true})}});
+
+test('backup physically erases subscription secrets without changing the safety database',async()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-backup-subscriptions-'));
+ try{
+  const live=join(dir,'live'),out=join(dir,'out'),s=new MeetingStore(live),subscriptions=new SubscriptionStore(s.db);
+  const webhookSecret='wecom-key-physical-erasure-aaaaaaaa',webhook=`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=${webhookSecret}`;
+  const callbackSecret='ordinary-callback-physical-erasure.example',callbackToken='ordinary-bearer-physical-erasure';
+  s.create('d','m');const bot=subscriptions.createWecom({name:'群',callbackUrl:webhook,now:1});
+  const ordinary=subscriptions.apply('ordinary',`https://${callbackSecret}/hooks`,callbackToken,1);
+  const headerSecret='frozen-header-physical-erasure',bodySecret='frozen-share-physical-erasure';
+  const frozen=JSON.stringify({headers:{authorization:`Bearer ${headerSecret}`},body:`{"shareUrl":"https://example.test/#${bodySecret}"}`});
+  s.db.prepare('INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,created_at,payload_json,share_expires_at) VALUES(?,?,?,?,?,?,?)').run('event',bot.id,'m',0,1,frozen,100);
+  s.db.prepare('INSERT INTO wecom_rate_limits(webhook_hash,next_allowed_at) VALUES(?,?)').run(hash(webhook),8);
+  backupDatabase({sourcePath:live,outputPath:out});
+  const copy=new DatabaseSync(out,{readOnly:true});
+  try{for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])a.equal(copy.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0);for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])a.ok(copy.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));}finally{copy.close()}
+  const {readFileSync}=await import('node:fs'),bytes=readFileSync(out);
+  for(const secret of [webhookSecret,callbackSecret,callbackToken,headerSecret,bodySecret,hash(webhook)])a.equal(bytes.includes(Buffer.from(secret)),false,`exported bytes contain ${secret}`);
+  a.equal(s.db.prepare('SELECT callback_url FROM meeting_subscriptions WHERE id=?').get(bot.id).callback_url,webhook);
+  a.equal(s.db.prepare('SELECT callback_token FROM meeting_subscriptions WHERE id=?').get(ordinary.id).callback_token,callbackToken);
+  a.equal(s.db.prepare('SELECT payload_json FROM subscription_deliveries WHERE event_id=?').get('event').payload_json,frozen);
+  a.equal(s.db.prepare('SELECT next_allowed_at FROM wecom_rate_limits WHERE webhook_hash=?').get(hash(webhook)).next_allowed_at,8);
+  s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});

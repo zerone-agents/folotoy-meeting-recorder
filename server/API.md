@@ -102,7 +102,72 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
 
 仅当 `allowDownload` 为 true 时包含 `downloadUrls`，同时提供纪要和逐字稿两个下载地址。订阅方需从 `shareUrl` 的 fragment 取出分享令牌，并以 `Authorization: Bearer <token>` 请求下载地址；未启用 `includeTranscript` 时，逐字稿下载地址返回 404。两个下载地址遵循与分享链接相同的权限和有效期。
 
-任意 2xx 均视为送达。非 2xx、网络错误或 10 秒超时会按 5 秒至 5 分钟的指数退避持续重试；回调不得依赖重定向。投递为至少一次语义，接收方必须以 `eventId` 去重，分享链接也应作为敏感凭证保护。撤销订阅或删除会议会取消尚未送达的事件；已经发出的链接和响应无法撤回，会议删除后链接的新访问失效。服务必须配置 `MEETING_PUBLIC_BASE_URL` 为包含 `/meeting-service` 的外部访问前缀，否则不会发送回调。
+任意 2xx 均视为送达。HTTP 408、429、5xx、网络错误或 10 秒超时会按 5 秒至 5 分钟的指数退避持续重试；其他 HTTP 4xx 为终态失败，记录 `failedAt` 和安全的 `lastError`，不再重试并清除冻结载荷。回调不得依赖重定向。投递为至少一次语义，接收方必须以 `eventId` 去重，分享链接也应作为敏感凭证保护。撤销订阅或删除会议会取消尚未送达的事件；已经发出的链接和响应无法撤回，会议删除后链接的新访问失效。服务必须配置 `MEETING_PUBLIC_BASE_URL` 为包含 `/meeting-service` 的外部访问前缀，否则不会发送回调。
+
+### 企业微信群机器人订阅
+
+以下三个接口均要求管理员认证，使用与普通订阅相同的 `Authorization: Bearer <MEETING_ADMIN_TOKEN>`；未认证返回 401。测试推送和自动正式投递都必须配置 `MEETING_PUBLIC_BASE_URL`，且不能向真实群发送消息来替代自动化测试。
+
+管理员通过 `POST /admin/subscriptions/wecom` 直接创建并批准一个企业微信订阅。请求只允许以下字段：
+
+```json
+{
+  "name": "产品群",
+  "callbackUrl": "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=REDACTED",
+  "days": 7,
+  "includeTranscript": false,
+  "allowDownload": false
+}
+```
+
+`callbackUrl` 只接受上述规范 HTTPS 主机和路径，以及由字母、数字、下划线或连字符组成的 16–128 字符 key，不允许其他查询参数、fragment、用户信息或显式端口。`days` 为 1–365 的整数，后两个权限默认关闭。成功返回 HTTP 201：
+
+```json
+{
+  "id": "订阅 ID",
+  "status": "approved",
+  "channel": "wecom",
+  "days": 7,
+  "includeTranscript": false,
+  "allowDownload": false
+}
+```
+
+字段、URL 或分享配置无效时返回 HTTP 400 和 `{"error":"invalid"}`。`GET /admin/subscriptions` 对企业微信订阅只返回不含 key 的预览地址 `https://qyapi.weixin.qq.com/cgi-bin/webhook/send`，不会泄露完整 webhook、机器人 key 或分享凭证；读取后的脱敏不表示数据库中的秘密可以写入日志或备份说明。
+
+`POST /admin/subscriptions/wecom/test` 用未保存的 webhook 发送测试卡片，请求体只能为 `{"callbackUrl":"https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=REDACTED"}`。`POST /admin/subscriptions/:id/test` 对已有 approved 企业微信订阅发送相同测试卡片，请求体为 `{}`；不存在、非企业微信或已撤销时返回 404。测试只包含公开服务入口，不创建会议分享、投递事件或携带分享令牌。企业微信接受时均返回 HTTP 200 和 `{"ok":true}`；URL 或公开基础地址无效时返回 HTTP 400 和 `{"ok":false,"error":"invalid"}`；处于共享限速窗口时返回 HTTP 429 和 `{"ok":false,"error":"rate_limited"}`；上游拒绝、HTTP 错误、超时或网络错误返回 HTTP 502，例如 `{"ok":false,"error":"wecom_45009"}`。其他安全错误码包括 `wecom_<errcode>`、`http_<status>`、`timeout` 和 `network_error`；不会把上游 `errmsg`、完整 webhook 或网络异常原文返回给客户端。
+
+同一机器人 key 的未保存测试、已保存测试和正式自动投递共享每 3 秒一个发送时隙，限制跨订阅、跨重启持久化。第 21 条消息也必须等待下一可用时隙；自动投递在限流窗口内保持待发送，不把它记作上游失败。
+
+新纪要完成时，企业微信正式卡片只有一次物化。首次尝试在同一事务中创建分享并冻结卡片 JSON、分享过期时间和目标；重试始终复用原文与同一个分享，之后修改订阅天数、权限或标题不会重建重试内容。分享已到期而仍未送达时，投递以 `share_expired` 终止。可重试错误（包括 `wecom_45009`、408、429、5xx、超时及网络错误）按 5 秒至 5 分钟指数退避；不可重试错误不再发送。成功或终态失败后清除冻结正文。
+
+`GET /admin/subscription-deliveries` 的 `attempts`、`deliveredAt`、`failedAt` 和 `lastError` 表示尝试次数、送达终态、失败终态及安全错误码。`deliveredAt` 非空表示成功；`failedAt` 非空表示不可重试失败或 `share_expired`，二者均为空表示仍待投递或重试。企业微信终态失败示例为 `wecom_93000`，不会包含原始上游消息。
+
+完整正式 `template_card` 请求体如下，其中 URL 和令牌仅为合成文档示例：
+
+```json
+{
+  "msgtype": "template_card",
+  "template_card": {
+    "card_type": "text_notice",
+    "main_title": {
+      "title": "新会议纪要已生成",
+      "desc": "产品周会"
+    },
+    "sub_title_text": "完成时间：2026-11-10 17:00（UTC+8）\n分享有效期至：2026-11-17 17:00（UTC+8）\n点击查看会议纪要",
+    "card_action": {
+      "type": 1,
+      "url": "https://meetings.example/meeting-service/share#synthetic-share-token"
+    }
+  }
+}
+```
+
+企业微信卡片不包含纪要或逐字稿正文，也不包含任何额外下载链接，无论订阅的 `includeTranscript`、`allowDownload` 如何配置；这些权限只作用于卡片唯一分享链接打开的页面。分享令牌保留在 URL fragment 中，不应进入查询参数、 webhook 或日志。
+
+#### 真实客户端上线门槛
+
+发布前必须使用专用测试群和短时、仅纪要、禁止下载的合成会议链接，在企业微信桌面端和移动端分别点击卡片，确认打开的是同一合成会议纪要，并检查服务日志不含 fragment 令牌。验收记录必须包含：桌面平台与客户端版本、移动平台与客户端版本、验收日期、合成会议 ID、两端结果和日志检查结果。当前状态：**待验收，阻断发布**；尚无真实测试机器人，因此未执行真实 webhook 投递，也未产生上述实机结果。任一端丢失 fragment 时停止发布并实施后续恢复方案，不得把令牌移入查询参数。
 
 ## 人工编辑纪要
 

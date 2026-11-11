@@ -8,6 +8,7 @@ import {rejectExistingSidecars} from './output-path.mjs';
 import {tombstoneMetadataClean} from './tombstone.mjs';
 import {validateShareSchema} from './share-schema.mjs';
 import {reconcileTimeKeyState} from './time-key-store.mjs';
+import {readSubscriptionSnapshot,restoreSubscriptionSnapshot} from './subscription-restore.mjs';
 
 /** Restore to a new file using a newer, authoritative safety ledger.
  * Stop every service/worker before calling and keep it stopped through cutover. */
@@ -20,7 +21,9 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
   lock=acquireServiceLock(safety);
   const fd=openSync(output,'wx',0o600);closeSync(fd);reserved=true;rejectExistingSidecars(output);
   source=new DatabaseSync(safety,{readOnly:true});source.exec('BEGIN');
-  const safetyCheck=source.prepare('PRAGMA quick_check').all();if(safetyCheck.length!==1||Object.values(safetyCheck[0])[0]!=='ok')throw new Error('safety_integrity_failed');if(source.prepare('PRAGMA foreign_key_check').all().length)throw new Error('safety_foreign_key_failed');
+  const safetyCheck=source.prepare('PRAGMA quick_check').all();if(safetyCheck.length!==1||Object.values(safetyCheck[0])[0]!=='ok')throw new Error('safety_integrity_failed');
+  const subscriptionSnapshot=readSubscriptionSnapshot(source);
+  if(source.prepare('PRAGMA foreign_key_check').all().length)throw new Error('safety_foreign_key_failed');
   const instance=source.prepare("SELECT value FROM service_metadata WHERE key='instance_id'").get()?.value;
   if(!instance)throw new Error('missing_safety_identity');
   const shareTable=source.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meeting_shares'").get();
@@ -134,6 +137,8 @@ export function restoreDatabase({backupPath, safetyPath, outputPath}) {
    for(const current of target.prepare('SELECT id FROM devices').all())if(!devices.some(device=>device.id===current.id))throw new Error('safety_device_missing');
    target.exec('DELETE FROM devices');
    for(const device of devices){if(!device.revoked&&target.prepare('SELECT 1 FROM revoked_tokens WHERE token_hash=?').get(device.token_hash))throw new Error('active_credential_revoked');target.prepare('INSERT INTO devices(id,token_hash,revoked) VALUES(?,?,?)').run(device.id,device.token_hash,device.revoked);}
+   if(target.prepare('PRAGMA foreign_key_check').all().length)throw new Error('restore_foreign_key_failed');
+   restoreSubscriptionSnapshot(target,subscriptionSnapshot);
    target.exec("UPDATE devices SET revoked=1 WHERE token_hash IN (SELECT token_hash FROM revoked_tokens); UPDATE meetings SET state=CASE state WHEN 'asr_running' THEN 'queued' ELSE 'minutes_queued' END, generation=generation+1, lease_token=NULL,lease_until=NULL,retry_at=0 WHERE state IN ('asr_running','minutes_running'); COMMIT");
   }catch(e){target.exec('ROLLBACK');throw e}
   const outputCheck=target.prepare('PRAGMA quick_check').all();if(outputCheck.length!==1||Object.values(outputCheck[0])[0]!=='ok')throw new Error('restore_integrity_failed');if(target.prepare('PRAGMA foreign_key_check').all().length)throw new Error('restore_foreign_key_failed');

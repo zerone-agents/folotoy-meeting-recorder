@@ -6,7 +6,7 @@ import { meetingUi, meetingIcon } from './ui.mjs';
 import { shareUi } from './share-ui.mjs';
 import {renderMinutesMarkdown,minutesForDownload} from './markdown-minutes.mjs';
 import {renderPreview} from './markdown-preview.mjs';
-import {SubscriptionStore} from './subscriptions.mjs';
+import {SubscriptionStore,testWecom} from './subscriptions.mjs';
 const validateUploadedAudio=audio=>{try{validateAudioStructure(audio)}catch(e){if(['invalid_audio','unsupported_audio'].includes(e?.message))throw new StoreError(e.message);throw e}};
 const secureEqual=(a,b)=>timingSafeEqual(createHash('sha256').update(a).digest(),createHash('sha256').update(b).digest());
 async function bounded(req,limit){
@@ -18,7 +18,7 @@ async function bounded(req,limit){
 }
 async function json(req,limit=8192){try{return JSON.parse((await bounded(req,limit)).toString('utf8'))}catch(e){if(e instanceof StoreError)throw e;throw new StoreError('invalid')}}
 /** Business router has its own authentication, regardless of runtime /v1 policy. */
-export function createMeetingRouter(store,{adminToken,adminId='local-admin',retentionSeconds=null,workerConcurrency=2,maxDeviceRequests=4,onDelete=()=>{},getAsrProgress=()=>null,timeKeys=null,timeSeconds=()=>Math.floor(Date.now()/1000),timeMonotonic=()=>performance.now(),maxTimeProofPerMinute=60}){
+export function createMeetingRouter(store,{adminToken,adminId='local-admin',retentionSeconds=null,workerConcurrency=2,maxDeviceRequests=4,onDelete=()=>{},getAsrProgress=()=>null,timeKeys=null,timeSeconds=()=>Math.floor(Date.now()/1000),timeMonotonic=()=>performance.now(),maxTimeProofPerMinute=60,subscriptionFetchImpl=fetch,publicBaseUrl:publicBaseUrlOption=null}){
  if(!Number.isSafeInteger(workerConcurrency)||workerConcurrency<1||workerConcurrency>4)throw new Error('invalid_worker_concurrency');
  if(!Number.isSafeInteger(maxDeviceRequests)||maxDeviceRequests<1||maxDeviceRequests>64)throw new Error('invalid_device_concurrency');
  if(typeof adminId!=='string'||!/^[A-Za-z0-9_-]{1,100}$/.test(adminId))throw new Error('invalid_admin_id');
@@ -55,6 +55,9 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  const subscriptionConfig=body=>{if(!body||Array.isArray(body)||typeof body!=='object'||Object.keys(body).some(k=>!['days','includeTranscript','allowDownload'].includes(k)))throw new StoreError('invalid');return body};
  app.get('/admin/subscriptions',c=>{admin(c);return c.json({subscriptions:subscriptions.list()})});
  app.get('/admin/subscription-deliveries',c=>{admin(c);return c.json({deliveries:subscriptions.deliveries()})});
+ app.post('/admin/subscriptions/wecom',async c=>{admin(c);const b=await json(c.req.raw);if(!b||Array.isArray(b)||Object.keys(b).some(k=>!['name','callbackUrl','days','includeTranscript','allowDownload'].includes(k)))throw new StoreError('invalid');try{return c.json(subscriptions.createWecom(b),201)}catch{throw new StoreError('invalid')}});
+ app.post('/admin/subscriptions/wecom/test',async c=>{admin(c);const b=await json(c.req.raw);if(!b||Object.keys(b).join(',')!=='callbackUrl')throw new StoreError('invalid');const result=await testWecom({db:store.db,callbackUrl:b.callbackUrl,baseUrl:publicBaseUrlOption,fetchImpl:subscriptionFetchImpl});return c.json(result.body,result.status)});
+ app.post('/admin/subscriptions/:id/test',async c=>{admin(c);let target;try{target=subscriptions.wecomTarget(c.req.param('id'))}catch(e){if(e?.message==='invalid'||e?.message==='not_found')throw new StoreError(e.message);throw e}const result=await testWecom({db:store.db,callbackUrl:target.callbackUrl,baseUrl:publicBaseUrlOption,fetchImpl:subscriptionFetchImpl});return c.json(result.body,result.status)});
  app.post('/admin/subscriptions/:id/approve',async c=>{admin(c);const body=c.req.raw.body?subscriptionConfig(await json(c.req.raw)):{};return c.json(subscriptionAction(id=>subscriptions.review(id,true,Math.floor(Date.now()/1000),body),c.req.param('id')))});
  app.patch('/admin/subscriptions/:id',async c=>{admin(c);const body=subscriptionConfig(await json(c.req.raw));return c.json(subscriptionAction(id=>subscriptions.updateShareConfig(id,body),c.req.param('id')))});
  app.post('/admin/subscriptions/:id/reject',c=>{admin(c);return c.json(subscriptionAction(id=>subscriptions.review(id,false),c.req.param('id')))});

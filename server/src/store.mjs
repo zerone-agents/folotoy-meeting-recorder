@@ -79,10 +79,13 @@ export class MeetingStore {
     return hash(JSON.stringify([m.transcript,m.minutes,edit?.markdown??null,edit?.revision??0]));
   }
   markReviewed(id,key){if(typeof key!=='string'||!/^[a-f0-9]{64}$/.test(key))fail('invalid');return this.tx(()=>{const m=this.adminGet(id);if(!m.reviewKey||m.reviewKey!==key)fail('conflict');this.db.prepare('INSERT INTO meeting_reviews(meeting_id,review_key) VALUES(?,?) ON CONFLICT(meeting_id) DO UPDATE SET review_key=excluded.review_key').run(id,key);return {reviewed:true};});}
-  createShare(id,includeTranscript,days,now=Math.floor(Date.now()/1000),allowDownload=false) {
+  createShareInTransaction(id,includeTranscript,days,now=Math.floor(Date.now()/1000),allowDownload=false) {
     if(!validId(id)||typeof includeTranscript!=='boolean'||typeof allowDownload!=='boolean'||!Number.isSafeInteger(days)||days<1||days>365||!Number.isSafeInteger(now)||now<0)fail('invalid');
     const token=randomBytes(32).toString('base64url'),expiresAt=now+days*86400;
-    return this.tx(()=>{const m=this.db.prepare("SELECT minutes FROM meetings WHERE id=? AND state='completed'").get(id);if(!m||!m.minutes)fail('conflict');this.db.prepare('INSERT INTO meeting_shares(token_hash,meeting_id,include_transcript,expires_at,allow_download) VALUES(?,?,?,?,?)').run(hash(token),id,includeTranscript?1:0,expiresAt,allowDownload?1:0);return {token,expiresAt};});
+    const m=this.db.prepare("SELECT minutes FROM meetings WHERE id=? AND state='completed'").get(id);if(!m||!m.minutes)fail('conflict');this.db.prepare('INSERT INTO meeting_shares(token_hash,meeting_id,include_transcript,expires_at,allow_download) VALUES(?,?,?,?,?)').run(hash(token),id,includeTranscript?1:0,expiresAt,allowDownload?1:0);return {token,expiresAt};
+  }
+  createShare(id,includeTranscript,days,now=Math.floor(Date.now()/1000),allowDownload=false) {
+    return this.tx(()=>this.createShareInTransaction(id,includeTranscript,days,now,allowDownload));
   }
   readShare(token,now=Math.floor(Date.now()/1000)) {
     if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token)||!Number.isSafeInteger(now))return null;
