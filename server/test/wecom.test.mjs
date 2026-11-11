@@ -22,6 +22,8 @@ test('WeCom webhook accepts only the canonical endpoint and key',()=>{
 test('meeting title removes controls, falls back and truncates by code point',()=>{
   assert.equal(cleanMeetingTitle('  产品\u0000\u200e\n  周会  ','m'),'产品 周会');
   assert.equal(cleanMeetingTitle('\u200e','meeting-id'),'meeting-id');
+  assert.equal(cleanMeetingTitle(null,'meeting-id'),'meeting-id');
+  assert.equal(cleanMeetingTitle(undefined,'meeting-id'),'meeting-id');
   assert.equal(cleanMeetingTitle('😀'.repeat(31),'m'),'😀'.repeat(29)+'…');
 });
 

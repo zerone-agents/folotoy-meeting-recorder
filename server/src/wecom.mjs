@@ -10,7 +10,7 @@ export function validateWecomWebhook(value){
 export function cleanMeetingTitle(title,meetingId){
   const clean=value=>String(value).replace(/[\p{Cc}\p{Cf}]/gu,'').replace(/\s+/gu,' ').trim();
   const truncate=value=>{const chars=[...value];return chars.length>30?chars.slice(0,29).join('')+'…':value};
-  return truncate(clean(title)||clean(meetingId));
+  return truncate(clean(title??'')||clean(meetingId??''));
 }
 
 function timestamp(seconds,timeZone){
