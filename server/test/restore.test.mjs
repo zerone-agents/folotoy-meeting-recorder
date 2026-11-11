@@ -165,3 +165,45 @@ for(const [name,sql] of contradictoryDeliveryCases)test(`restore rejects ${name}
   a.equal(existsSync(out),false);
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
+
+
+test('pre-freeze ordinary retry migrates to first attempt then restores and delivers one frozen share',async()=>{
+ const {drainSubscriptions}=await import('../src/subscriptions.mjs');
+ const dir=mkdtempSync(join(tmpdir(),'meeting-prefreeze-retry-'));
+ try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out');let s=new MeetingStore(live);const subscriptions=new SubscriptionStore(s.db);
+  const applied=subscriptions.apply('ordinary','https://subscriber.example/hooks','callback-secret-123',1);subscriptions.review(applied.id,true,1);
+  const audio=Buffer.from('audio');s.create('d','m');s.put('d','m',0,audio,digest(audio));s.finalize('d','m',{count:1,bytes:audio.length,digest:digest(audio),reason:'user'});
+  s.db.prepare("UPDATE meetings SET state='completed',minutes=?,completed_at=2 WHERE id='m'").run(JSON.stringify({summary:'minutes'}));
+  s.db.prepare('VACUUM INTO ?').run(backup);
+  s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,next_attempt_at,created_at,last_error) VALUES('legacy-retry',?,'m',0,2,88,4,'timeout')").run(applied.id);s.close();
+  const legacy=new DatabaseSync(live);
+  legacy.exec(`ALTER TABLE meeting_subscriptions DROP COLUMN channel;
+   ALTER TABLE subscription_deliveries DROP COLUMN payload_json;
+   ALTER TABLE subscription_deliveries DROP COLUMN share_expires_at;
+   ALTER TABLE subscription_deliveries DROP COLUMN failed_at;
+   DELETE FROM service_metadata WHERE key='subscription_schema';`);legacy.close();
+  s=new MeetingStore(live);
+  a.deepEqual({...s.db.prepare("SELECT attempts,next_attempt_at,last_error,payload_json,share_expires_at FROM subscription_deliveries WHERE event_id='legacy-retry'").get()},{attempts:0,next_attempt_at:0,last_error:null,payload_json:null,share_expires_at:null});s.close();
+  restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out});s=new MeetingStore(out);
+  a.deepEqual({...s.db.prepare("SELECT attempts,next_attempt_at,last_error,payload_json,share_expires_at FROM subscription_deliveries WHERE event_id='legacy-retry'").get()},{attempts:0,next_attempt_at:0,last_error:null,payload_json:null,share_expires_at:null});
+  let request;
+  await drainSubscriptions(s,{baseUrl:'https://example.com',now:()=>10,fetchImpl:async(_url,options)=>{request=options;return new Response(null,{status:204})}});
+  const event=JSON.parse(request.body),row=s.db.prepare("SELECT attempts,delivered_at,failed_at,last_error,payload_json FROM subscription_deliveries WHERE event_id='legacy-retry'").get();
+  a.equal(event.eventId,'legacy-retry');a.match(event.shareUrl,/^https:\/\/example\.com\/share#/);a.equal(request.headers.authorization,'Bearer callback-secret-123');
+  a.equal(s.db.prepare('SELECT COUNT(*) AS n FROM meeting_shares').get().n,1);
+  a.deepEqual({...row},{attempts:0,delivered_at:10,failed_at:null,last_error:null,payload_json:null});s.close();
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
+
+test('current marked schema never rewrites an invalid attempted pending row',async()=>{
+ const {initializeSubscriptions}=await import('../src/subscriptions.mjs');
+ const s=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(s.db);
+ try{
+  const applied=subscriptions.apply('ordinary','https://subscriber.example/hooks',null,1);subscriptions.review(applied.id,true,1);s.create('d','m');
+  s.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,next_attempt_at,created_at,last_error) VALUES('current-bad',?,'m',0,1,5,1,'timeout')").run(applied.id);
+  initializeSubscriptions(s.db);
+  a.equal(s.db.prepare("SELECT attempts FROM subscription_deliveries WHERE event_id='current-bad'").get().attempts,1);
+  a.throws(()=>readSubscriptionSnapshot(s.db),error=>error.message==='invalid_subscription_state');
+ }finally{s.close()}
+});

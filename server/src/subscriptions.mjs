@@ -95,10 +95,13 @@ export function initializeSubscriptions(db) {
     if (!hasChannel) db.exec("ALTER TABLE meeting_subscriptions ADD COLUMN channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))");
     db.exec(`CREATE TABLE IF NOT EXISTS wecom_rate_limits(webhook_hash TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL CHECK(next_allowed_at>=0));
       INSERT INTO service_metadata(key,value) VALUES('subscription_schema','1') ON CONFLICT(key) DO UPDATE SET value='1';`);
+    const deliveryColumns = new Set(db.prepare('PRAGMA table_info(subscription_deliveries)').all().map(column => column.name));
+    const preFreezeRetryMigration = marker === undefined && !deliveryColumns.has('payload_json') && !deliveryColumns.has('share_expires_at');
     for (const [name, definition] of [['payload_json', 'TEXT'], ['share_expires_at', 'INTEGER'], ['failed_at', 'INTEGER']]) {
-      const deliveryColumns = new Set(db.prepare('PRAGMA table_info(subscription_deliveries)').all().map(column => column.name));
       if (!deliveryColumns.has(name)) db.exec(`ALTER TABLE subscription_deliveries ADD COLUMN ${name} ${definition}`);
     }
+    if (preFreezeRetryMigration) db.prepare(`UPDATE subscription_deliveries SET attempts=0,next_attempt_at=0,last_error=NULL,payload_json=NULL,share_expires_at=NULL
+      WHERE delivered_at IS NULL AND failed_at IS NULL AND attempts>0 AND payload_json IS NULL`).run();
     db.exec('COMMIT');
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch {}
