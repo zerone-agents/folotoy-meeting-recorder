@@ -85,15 +85,24 @@ export function initializeSubscriptions(db) {
   const expectedChannel = "channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))".replace(/\s+/g, '');
   const normalizedTableSql = table?.sql?.replace(/\s+/g, '');
   const validChannelDefinition = ['(', ','].some(prefix => [',', ')'].some(suffix => normalizedTableSql?.includes(`${prefix}${expectedChannel}${suffix}`)));
-  if (table && marker === '1' && (!subscriptionColumns().has('channel') || !validChannelDefinition ||
-      db.prepare("SELECT 1 FROM meeting_subscriptions WHERE channel IS NULL OR channel NOT IN ('webhook','wecom') LIMIT 1").get())) throw new Error('invalid_subscription_state');
+  const hasChannel = subscriptionColumns().has('channel');
   if (marker !== undefined && marker !== '1') throw new Error('invalid_subscription_state');
-  if (!subscriptionColumns().has('channel')) db.exec("ALTER TABLE meeting_subscriptions ADD COLUMN channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))");
-  db.exec(`CREATE TABLE IF NOT EXISTS wecom_rate_limits(webhook_hash TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL CHECK(next_allowed_at>=0));
-    INSERT INTO service_metadata(key,value) VALUES('subscription_schema','1') ON CONFLICT(key) DO UPDATE SET value='1';`);
-  for (const [name, definition] of [['payload_json', 'TEXT'], ['share_expires_at', 'INTEGER'], ['failed_at', 'INTEGER']]) {
-    const deliveryColumns = new Set(db.prepare('PRAGMA table_info(subscription_deliveries)').all().map(column => column.name));
-    if (!deliveryColumns.has(name)) db.exec(`ALTER TABLE subscription_deliveries ADD COLUMN ${name} ${definition}`);
+  if (marker === undefined && hasChannel) throw new Error('invalid_subscription_state');
+  if (marker === '1' && (!hasChannel || !validChannelDefinition ||
+      db.prepare("SELECT 1 FROM meeting_subscriptions WHERE channel IS NULL OR channel NOT IN ('webhook','wecom') LIMIT 1").get())) throw new Error('invalid_subscription_state');
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (!hasChannel) db.exec("ALTER TABLE meeting_subscriptions ADD COLUMN channel TEXT NOT NULL DEFAULT 'webhook' CHECK(channel IN ('webhook','wecom'))");
+    db.exec(`CREATE TABLE IF NOT EXISTS wecom_rate_limits(webhook_hash TEXT PRIMARY KEY,next_allowed_at INTEGER NOT NULL CHECK(next_allowed_at>=0));
+      INSERT INTO service_metadata(key,value) VALUES('subscription_schema','1') ON CONFLICT(key) DO UPDATE SET value='1';`);
+    for (const [name, definition] of [['payload_json', 'TEXT'], ['share_expires_at', 'INTEGER'], ['failed_at', 'INTEGER']]) {
+      const deliveryColumns = new Set(db.prepare('PRAGMA table_info(subscription_deliveries)').all().map(column => column.name));
+      if (!deliveryColumns.has(name)) db.exec(`ALTER TABLE subscription_deliveries ADD COLUMN ${name} ${definition}`);
+    }
+    db.exec('COMMIT');
+  } catch (error) {
+    try { db.exec('ROLLBACK'); } catch {}
+    throw error;
   }
 }
 
@@ -132,7 +141,7 @@ export class SubscriptionStore {
     const result = this.db.prepare("UPDATE meeting_subscriptions SET status=?,reviewed_at=?,share_days=?,include_transcript=?,allow_download=? WHERE id=? AND status='pending'")
       .run(status, now, share.days, share.includeTranscript ? 1 : 0, share.allowDownload ? 1 : 0, id);
     if (!result.changes) throw new Error('not_found');
-    if (!approve) this.db.prepare('DELETE FROM subscription_deliveries WHERE subscription_id=? AND delivered_at IS NULL').run(id);
+    if (!approve) this.db.prepare('DELETE FROM subscription_deliveries WHERE subscription_id=? AND delivered_at IS NULL AND failed_at IS NULL').run(id);
     return { id, status, ...share };
   }
   updateShareConfig(id, config) {
@@ -148,7 +157,7 @@ export class SubscriptionStore {
     if (typeof id !== 'string' || !Number.isSafeInteger(now) || now < 0) throw new Error('invalid');
     const result = this.db.prepare("UPDATE meeting_subscriptions SET status='revoked',reviewed_at=? WHERE id=? AND status='approved'").run(now, id);
     if (!result.changes) throw new Error('not_found');
-    this.db.prepare('DELETE FROM subscription_deliveries WHERE subscription_id=? AND delivered_at IS NULL').run(id);
+    this.db.prepare('DELETE FROM subscription_deliveries WHERE subscription_id=? AND delivered_at IS NULL AND failed_at IS NULL').run(id);
     return { id, status: 'revoked' };
   }
   deliveries() {

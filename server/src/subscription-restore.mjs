@@ -1,5 +1,6 @@
 const integer=value=>Number.isSafeInteger(value)&&value>=0;
 const safeCode=value=>value===null||/^[a-z0-9_]{1,80}$/.test(value);
+const retryableCode=value=>value==='timeout'||value==='network_error'||value==='wecom_45009'||value==='http_408'||value==='http_429'||/^http_5[0-9]{2}$/.test(value);
 const invalid=()=>{throw new Error('invalid_subscription_state')};
 const table=(db,name)=>db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name);
 
@@ -24,11 +25,16 @@ export function readSubscriptionSnapshot(db){
   if(row.failed_at!==null&&!integer(row.failed_at))invalid();
   if(row.share_expires_at!==null&&!integer(row.share_expires_at))invalid();
   if(row.delivered_at!==null&&row.failed_at!==null)invalid();
-  if((row.delivered_at!==null||row.failed_at!==null)&&row.payload_json!==null)invalid();
-  if(row.payload_json===null&&row.delivered_at===null&&row.failed_at===null&&row.attempts>0&&row.last_error===null)invalid();
-  if(row.payload_json!==null){
+  if(row.delivered_at!==null){
+   if(row.payload_json!==null||row.last_error!==null)invalid();
+  }else if(row.failed_at!==null){
+   if(row.payload_json!==null||row.last_error===null||retryableCode(row.last_error))invalid();
+  }else if(row.payload_json===null){
+   if(row.attempts>0||row.last_error!==null)invalid();
+  }else{
    let saved;try{saved=JSON.parse(row.payload_json)}catch{invalid()}
    if(typeof saved?.body!=='string'||!saved.headers||typeof saved.headers!=='object'||Array.isArray(saved.headers)||!integer(row.share_expires_at))invalid();
+   if(row.attempts>0?!retryableCode(row.last_error):row.last_error!==null)invalid();
   }
   const meeting=db.prepare('SELECT state FROM meetings WHERE id=?').get(row.meeting_id);if(!meeting)invalid();
   if(['deleted','deleting','cancelled'].includes(meeting.state)&&row.delivered_at===null&&row.failed_at===null)invalid();

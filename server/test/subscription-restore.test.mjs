@@ -55,3 +55,14 @@ test('null snapshot clears all existing subscription state',()=>{
   for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])assert.equal(target.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0);
  }finally{target.close()}
 });
+
+
+test('valid first-attempt pending delivery without payload remains restorable',()=>{
+ const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+ try{
+  store.create('d','m');const bot=subscriptions.createWecom({name:'群',callbackUrl:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=eeeeeeeeeeeeeeee',now:1});
+  store.db.prepare("INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at) VALUES('first',?,'m',0,0,1)").run(bot.id);
+  const snapshot=readSubscriptionSnapshot(store.db);
+  assert.equal(snapshot.deliveries[0].attempts,0);assert.equal(snapshot.deliveries[0].payload_json,null);
+ }finally{store.close()}
+});

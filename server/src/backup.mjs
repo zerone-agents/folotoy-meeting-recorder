@@ -20,6 +20,8 @@ export function backupDatabase({sourcePath,outputPath}){
   try{
    sanitized.exec('PRAGMA foreign_keys=ON; BEGIN IMMEDIATE');
    sanitized.exec('DELETE FROM subscription_deliveries; DELETE FROM wecom_rate_limits; DELETE FROM meeting_subscriptions; COMMIT');
+   // Deletion alone leaves secrets in free pages; compact the isolated export.
+   sanitized.exec('PRAGMA secure_delete=ON; VACUUM');
   }finally{sanitized.close()}
   copy=new DatabaseSync(output,{readOnly:true});if(copy.prepare("SELECT value FROM service_metadata WHERE key='instance_id'").get()?.value!==id)throw new Error('backup_identity_mismatch');
   validateTimeKeyState(copy);

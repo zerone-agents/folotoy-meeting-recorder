@@ -271,3 +271,71 @@ test('operator docs include WeCom routes and recovery boundaries',()=>{
   for(const table of ['meeting_subscriptions','subscription_deliveries','wecom_rate_limits'])assert.ok(backup.includes(table));
   assert.match(backup,/最新安全库/);assert.match(backup,/净化/);
 });
+
+
+test('missing marker with a valid current channel definition fails closed',()=>{
+  const store=new MeetingStore(':memory:');
+  try{
+    store.db.prepare("DELETE FROM service_metadata WHERE key='subscription_schema'").run();
+    assert.throws(()=>initializeSubscriptions(store.db),{message:'invalid_subscription_state'});
+    assert.equal(store.db.prepare("SELECT 1 FROM service_metadata WHERE key='subscription_schema'").get(),undefined);
+  }finally{store.close()}
+});
+
+test('missing marker with a corrupt channel definition fails closed',()=>{
+  const db=new DatabaseSync(':memory:');
+  try{
+    db.exec(`CREATE TABLE service_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+      CREATE TABLE meetings(id TEXT PRIMARY KEY);
+      CREATE TABLE meeting_subscriptions(id TEXT PRIMARY KEY,name TEXT NOT NULL,callback_url TEXT NOT NULL,callback_token TEXT,status TEXT NOT NULL,created_at INTEGER NOT NULL,reviewed_at INTEGER,share_days INTEGER NOT NULL DEFAULT 7,include_transcript INTEGER NOT NULL DEFAULT 0,allow_download INTEGER NOT NULL DEFAULT 0,channel TEXT NOT NULL DEFAULT 'webhook');`);
+    assert.throws(()=>initializeSubscriptions(db),{message:'invalid_subscription_state'});
+  }finally{db.close()}
+});
+
+test('legacy channel migration and schema marker update roll back together',()=>{
+  const directory=mkdtempSync(join(tmpdir(),'wecom-migration-rollback-')),path=join(directory,'legacy.sqlite');
+  const seeded=new MeetingStore(path),subscriptions=new SubscriptionStore(seeded.db);
+  subscriptions.apply('旧服务','https://subscriber.example/hooks',null,1);seeded.close();
+  const legacy=new DatabaseSync(path);
+  try{
+    legacy.exec(`ALTER TABLE meeting_subscriptions DROP COLUMN channel;
+      DELETE FROM service_metadata WHERE key='subscription_schema';
+      CREATE TRIGGER reject_marker BEFORE INSERT ON service_metadata WHEN NEW.key='subscription_schema' BEGIN SELECT RAISE(ABORT,'marker rejected'); END;`);
+  }finally{legacy.close()}
+  const db=new DatabaseSync(path);
+  try{
+    assert.throws(()=>initializeSubscriptions(db),/marker rejected/);
+    assert.equal(db.prepare('PRAGMA table_info(meeting_subscriptions)').all().some(column=>column.name==='channel'),false);
+    assert.equal(db.prepare("SELECT 1 FROM service_metadata WHERE key='subscription_schema'").get(),undefined);
+  }finally{db.close();rmSync(directory,{recursive:true,force:true})}
+});
+
+test('unauthenticated saved and unsaved tests have no outbound or persistent effects',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);let calls=0;
+  try{
+    const bot=subscriptions.createWecom({name:'群',callbackUrl:url,now:1});
+    const app=createMeetingRouter(store,{adminToken:'admin123',subscriptionFetchImpl:async()=>{calls++;return Response.json({errcode:0})},publicBaseUrl:'https://meetings.example/meeting-service'});
+    for(const [path,body] of [['/admin/subscriptions/wecom/test',{callbackUrl:url}],[`/admin/subscriptions/${bot.id}/test`,{}]]){
+      const response=await app.request(path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+      assert.equal(response.status,401);
+    }
+    assert.equal(calls,0);
+    for(const table of ['wecom_rate_limits','meeting_shares','subscription_deliveries'])assert.equal(store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n,0);
+  }finally{store.close()}
+});
+
+test('retry expires exactly at share_expires_at without another upstream attempt',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const bot=subscriptions.createWecom({name:'群',callbackUrl:url,now:1});wecomCompletedMeeting(store);
+    let now=1000,calls=0;
+    const options={baseUrl:'https://example.com',now:()=>now,fetchImpl:async()=>{calls++;return Response.json({errcode:45009})}};
+    await drainSubscriptions(store,options);
+    const expiry=store.db.prepare('SELECT share_expires_at FROM subscription_deliveries').get().share_expires_at;
+    now=expiry;store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=?').run(expiry);
+    await drainSubscriptions(store,options);
+    const row=store.db.prepare('SELECT attempts,delivered_at,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+    assert.equal(calls,1);assert.equal(row.attempts,1);assert.equal(row.delivered_at,null);assert.equal(row.failed_at,expiry);assert.equal(row.last_error,'share_expired');assert.equal(row.payload_json,null);
+    assert.equal(store.db.prepare('SELECT status FROM meeting_subscriptions WHERE id=?').get(bot.id).status,'approved');
+  }finally{store.close()}
+});

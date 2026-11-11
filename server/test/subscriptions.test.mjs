@@ -186,3 +186,55 @@ test('ordinary webhook thrown errors use safe retryable classifications',async()
     }finally{store.close()}
   }
 });
+
+
+test('reject and revoke remove only pending deliveries and preserve terminal audit',()=>{
+  for(const action of ['reject','revoke']){
+    const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+    try{
+      const {id}=subscriptions.apply('service','https://subscriber.example/hooks');completedMeeting(store);
+      if(action==='revoke')subscriptions.review(id,true);
+      const insert=store.db.prepare('INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,delivered_at,failed_at,last_error) VALUES(?,?,?,?,?,?,?,?,?)');
+      insert.run('pending',id,'m',0,0,1,null,null,null);
+      insert.run('delivered',id,'m',1,1,1,2,null,null);
+      insert.run('failed',id,'m',2,1,1,null,3,'http_400');
+      if(action==='reject')subscriptions.review(id,false,4);else subscriptions.revoke(id,4);
+      assert.deepEqual(subscriptions.deliveries().map(row=>row.eventId).sort(),['delivered','failed']);
+      assert.equal(store.db.prepare('SELECT status FROM meeting_subscriptions WHERE id=?').get(id).status,'revoked');
+    }finally{store.close()}
+  }
+});
+
+test('ordinary retries freeze bearer and download fields and retain approval',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const {id}=subscriptions.apply('service','https://subscriber.example/hooks','callback-secret-123');subscriptions.review(id,true,1000,{includeTranscript:true,allowDownload:true});completedMeeting(store);
+    const requests=[];let now=1000,calls=0;
+    const options={baseUrl:'https://example.com',now:()=>now,fetchImpl:async(_url,request)=>{requests.push({headers:{...request.headers},body:JSON.parse(request.body)});calls++;return new Response(null,{status:calls===1?503:204})}};
+    await drainSubscriptions(store,options);
+    const delayed=store.db.prepare('SELECT attempts,next_attempt_at,delivered_at,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+    assert.equal(delayed.attempts,1);assert.equal(delayed.next_attempt_at,1005);assert.equal(delayed.delivered_at,null);assert.equal(delayed.failed_at,null);assert.equal(delayed.last_error,'http_503');assert.equal(typeof delayed.payload_json,'string');
+    await drainSubscriptions(store,{...options,now:()=>1004});assert.equal(calls,1);
+    now=1005;await drainSubscriptions(store,options);
+    assert.equal(calls,2);assert.deepEqual(requests[0],requests[1]);assert.equal(requests[1].headers.authorization,'Bearer callback-secret-123');
+    assert.deepEqual(requests[1].body.downloadUrls,{minutes:'https://example.com/share/download/minutes',transcript:'https://example.com/share/download/transcript'});
+    const delivered=store.db.prepare('SELECT attempts,delivered_at,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+    assert.equal(delivered.attempts,1);assert.equal(delivered.delivered_at,1005);assert.equal(delivered.failed_at,null);assert.equal(delivered.last_error,null);assert.equal(delivered.payload_json,null);
+    assert.equal(store.db.prepare('SELECT status FROM meeting_subscriptions WHERE id=?').get(id).status,'approved');
+  }finally{store.close()}
+});
+
+test('ordinary pending delivery expires exactly at share_expires_at',async()=>{
+  const store=new MeetingStore(':memory:'),subscriptions=new SubscriptionStore(store.db);
+  try{
+    const {id}=subscriptions.apply('service','https://subscriber.example/hooks');subscriptions.review(id,true);completedMeeting(store);
+    let now=1000,calls=0;
+    await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>now,fetchImpl:async()=>{calls++;return new Response(null,{status:503})}});
+    const expiry=store.db.prepare('SELECT share_expires_at FROM subscription_deliveries').get().share_expires_at;
+    now=expiry;store.db.prepare('UPDATE subscription_deliveries SET next_attempt_at=?').run(expiry);
+    await drainSubscriptions(store,{baseUrl:'https://example.com',now:()=>now,fetchImpl:async()=>{calls++;return new Response(null,{status:204})}});
+    const row=store.db.prepare('SELECT attempts,delivered_at,failed_at,last_error,payload_json FROM subscription_deliveries').get();
+    assert.equal(calls,1);assert.equal(row.attempts,1);assert.equal(row.delivered_at,null);assert.equal(row.failed_at,expiry);assert.equal(row.last_error,'share_expired');assert.equal(row.payload_json,null);
+    assert.equal(store.db.prepare('SELECT status FROM meeting_subscriptions WHERE id=?').get(id).status,'approved');
+  }finally{store.close()}
+});

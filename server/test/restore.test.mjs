@@ -144,3 +144,24 @@ for(const [name,corrupt] of corruptSubscriptionCases)test(`restore rejects ${nam
   a.equal(existsSync(out),false);
  }finally{rmSync(dir,{recursive:true,force:true})}
 });
+
+
+const contradictoryDeliveryCases=[
+ ['attempted pending timeout without payload',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,last_error) VALUES('event',?,'m',0,1,1,'timeout')"],
+ ['terminal without error',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,failed_at) VALUES('event',?,'m',0,1,1,2)"],
+ ['retryable error on terminal row',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,failed_at,last_error) VALUES('event',?,'m',0,1,1,2,'http_503')"],
+ ['terminal error on pending row',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,last_error,payload_json,share_expires_at) VALUES('event',?,'m',0,1,1,'http_400','{\"headers\":{},\"body\":\"{}\"}',9)"],
+ ['contradictory delivered and failed timestamps',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,delivered_at,failed_at,last_error) VALUES('event',?,'m',0,1,1,2,3,'http_400')"],
+ ['delivered row retaining an error',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,delivered_at,last_error) VALUES('event',?,'m',0,1,1,2,'http_503')"],
+ ['attempted pending row without retryable error',"INSERT INTO subscription_deliveries(event_id,subscription_id,meeting_id,meeting_generation,attempts,created_at,payload_json,share_expires_at) VALUES('event',?,'m',0,1,1,'{\"headers\":{},\"body\":\"{}\"}',9)"]
+];
+for(const [name,sql] of contradictoryDeliveryCases)test(`restore rejects ${name} with exact error and no output`,()=>{
+ const dir=mkdtempSync(join(tmpdir(),'meeting-subscription-state-'));
+ try{
+  const live=join(dir,'live'),backup=join(dir,'backup'),out=join(dir,'out'),s=new MeetingStore(live);
+  s.db.prepare('VACUUM INTO ?').run(backup);const bot=new SubscriptionStore(s.db).createWecom({name:'群',callbackUrl:'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=hhhhhhhhhhhhhhhh',now:1});s.create('d','m');
+  s.db.prepare(sql).run(bot.id);s.close();
+  a.throws(()=>restoreDatabase({backupPath:backup,safetyPath:live,outputPath:out}),error=>error.message==='invalid_subscription_state');
+  a.equal(existsSync(out),false);
+ }finally{rmSync(dir,{recursive:true,force:true})}
+});
