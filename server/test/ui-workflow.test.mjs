@@ -59,8 +59,8 @@ test('WeCom dialog tests without saving then saves approved configuration',async
   const names=['token','status','list','detail','more','load','pending','wecom-open','wecom-dialog','wecom-form','wecom-name','wecom-url','wecom-days','wecom-transcript','wecom-download','wecom-test','wecom-save','wecom-error','wecom-close','subscriptions-dialog','subscription-list','subscription-error','subscriptions-close','subscriptions-refresh'];
   const ids=Object.fromEntries(names.map(id=>[id,new Element()]));ids.token.value=admin;
   const context={document:{getElementById:id=>ids[id],createElement:tag=>new Element(tag)},location:{href:'https://local/meeting-service/ui'},URL,setTimeout,confirm:()=>true,fetch:(url,options)=>app.request(new URL(url).pathname.replace('/meeting-service','')+new URL(url).search,options)};
-  runInNewContext(script,context);ids['wecom-open'].click();ids['wecom-name'].value='产品群';ids['wecom-url'].value='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=aaaaaaaaaaaaaaaa';ids['wecom-days'].value='7';
-  await ids['wecom-test'].click();a.equal(store.db.prepare('SELECT COUNT(*) AS n FROM meeting_subscriptions').get().n,0);
+  runInNewContext(script,context);ids['wecom-open'].click();a.equal(ids['wecom-save'].disabled,true);ids['wecom-name'].value='产品群';ids['wecom-url'].value='https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=aaaaaaaaaaaaaaaa';ids['wecom-days'].value='7';
+  await ids['wecom-test'].click();a.equal(ids['wecom-save'].disabled,false);a.equal(store.db.prepare('SELECT COUNT(*) AS n FROM meeting_subscriptions').get().n,0);
   store.db.prepare('DELETE FROM wecom_rate_limits').run();await ids['wecom-form'].onsubmit({preventDefault(){}});
   const row=store.db.prepare('SELECT channel,status,share_days FROM meeting_subscriptions').get();a.deepEqual({...row},{channel:'wecom',status:'approved',share_days:7});
   a.match(ids['subscription-list'].textContent,/企业微信/);a.doesNotMatch(ids['subscription-list'].textContent,/aaaaaaaaaaaaaaaa/);a.match(html,/failedAt\?'终态失败':x\.deliveredAt\?'已送达':'待推送'/);
