@@ -53,7 +53,7 @@ npm test
 
 ## 文档与参与
 
-从[文档索引](docs/README.md)、[服务端接口](server/API.md)、[备份与恢复](server/BACKUP.md)和[项目历程](notes/2026-11-06-ai-passport-meeting-recorder-timeline.md)开始。欢迎提交问题与改进，约定见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请参见 [SECURITY.md](SECURITY.md)。
+从[文档索引](docs/README.md)、[会议纪要订阅使用指南](docs/subscriptions-guide.md)、[服务端接口](server/API.md)、[备份与恢复](server/BACKUP.md)和[项目历程](notes/2026-11-06-ai-passport-meeting-recorder-timeline.md)开始。欢迎提交问题与改进，约定见 [CONTRIBUTING.md](CONTRIBUTING.md)；安全问题请参见 [SECURITY.md](SECURITY.md)。
 
 ## 许可证
 

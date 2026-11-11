@@ -5,6 +5,7 @@
 ## 使用和部署
 
 - [服务运行](../server/OPERATIONS.md) · [接口](../server/API.md) · [备份与恢复](../server/BACKUP.md)
+- [会议纪要订阅使用指南](subscriptions-guide.md)：外部服务申请与企业微信机器人配置
 - [容器和反向代理](../deploy/README.md) · [服务供应商数据处理](../server/PROVIDER-DATA.md)
 - [设备固件与构建](../firmware/README.zh_CN.md) · [设备实测记录](../research/2026-11-03-agent-commissioning-upload-test.md)
 
