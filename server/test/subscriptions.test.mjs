@@ -5,6 +5,8 @@ import { MeetingStore } from '../src/store.mjs';
 import { SubscriptionStore, drainSubscriptions, publicBaseUrl } from '../src/subscriptions.mjs';
 import { createMeetingRouter } from '../src/routes.mjs';
 
+const completedAt = (store, id) => store.db.prepare('SELECT completed_at AS completedAt FROM meetings WHERE id=?').get(id).completedAt;
+
 function completedMeeting(store, id = 'm', title = null) {
   const audio = Buffer.from(`audio-${id}`), digest = createHash('sha256').update(audio).digest('hex');
   store.create('d', id);store.put('d', id, 0, audio, digest);
@@ -29,7 +31,7 @@ test('only approved subscriptions receive newly completed minutes as a minutes-o
     assert.equal(event.event, 'meeting.minutes.completed');
     assert.equal(event.meetingId, 'm');
     assert.equal(event.title, 'm');
-    assert.equal(event.completedAt, store.db.prepare("SELECT completed_at AS completedAt FROM meetings WHERE id='m'").get().completedAt);
+    assert.equal(event.completedAt, completedAt(store, 'm'));
     assert.match(event.shareUrl, /^https:\/\/meetings\.example\/meeting-service\/share#[A-Za-z0-9_-]{43}$/);
     const token = event.shareUrl.split('#')[1], shared = store.readShare(token);
     assert.match(shared.minutesMarkdown, /completed minutes/);
@@ -50,7 +52,7 @@ test('callback includes the cleaned meeting title and completion time', async ()
     let event;
     await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', now: () => 2000, fetchImpl: async (_url, options) => { event = JSON.parse(options.body);return new Response(null, { status: 200 }); } });
     assert.equal(event.title, '产品 周会');
-    assert.equal(event.completedAt, store.db.prepare("SELECT completed_at AS completedAt FROM meetings WHERE id='m'").get().completedAt);
+    assert.equal(event.completedAt, completedAt(store, 'm'));
   } finally { store.close(); }
 });
 
