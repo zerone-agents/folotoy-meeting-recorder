@@ -48,7 +48,7 @@ test('callback includes the cleaned meeting title and completion time', async ()
   const store = new MeetingStore(':memory:'), subscriptions = new SubscriptionStore(store.db);
   try {
     const { id } = subscriptions.apply('service', 'https://subscriber.example/hooks');subscriptions.review(id, true);
-    completedMeeting(store, 'm', '  产品\u0000\n  周会  ');
+    completedMeeting(store, 'm', '  产品\u200e\n  周会  ');
     let event;
     await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', now: () => 2000, fetchImpl: async (_url, options) => { event = JSON.parse(options.body);return new Response(null, { status: 200 }); } });
     assert.equal(event.title, '产品 周会');
