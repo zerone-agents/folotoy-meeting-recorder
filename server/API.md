@@ -91,6 +91,8 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
   "event": "meeting.minutes.completed",
   "eventId": "全局唯一事件 ID",
   "meetingId": "会议 ID",
+  "title": "会议名称，缺失或空白时回退为会议 ID",
+  "completedAt": 1799900000,
   "shareUrl": "https://meetings.example/meeting-service/share#凭证",
   "shareExpiresAt": 1799999999,
   "downloadUrls": {
@@ -99,6 +101,8 @@ ASR 运行期间，管理员结果接口的 `processing.asrProgress` 可返回 `
   }
 }
 ```
+
+`title` 使用与企业微信卡片相同的会议标题清理规则，缺失或空白时回退为 `meetingId`；`completedAt` 是纪要完成时间的 Unix 秒。两个字段为新增字段，旧版本事件可能不含它们，订阅方应宽容解析。
 
 仅当 `allowDownload` 为 true 时包含 `downloadUrls`，同时提供纪要和逐字稿两个下载地址。订阅方需从 `shareUrl` 的 fragment 取出分享令牌，并以 `Authorization: Bearer <token>` 请求下载地址；未启用 `includeTranscript` 时，逐字稿下载地址返回 404。两个下载地址遵循与分享链接相同的权限和有效期。
 

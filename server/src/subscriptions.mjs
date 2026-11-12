@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { buildWecomCard, buildWecomTestCard, sendWecom, validateWecomWebhook } from './wecom.mjs';
+import { buildWecomCard, buildWecomTestCard, cleanMeetingTitle, sendWecom, validateWecomWebhook } from './wecom.mjs';
 
 const validUrl = (value, allowLocalHttp = true) => {
   if (typeof value !== 'string' || value.length > 2048) return null;
@@ -187,12 +187,13 @@ function materializeDelivery(store, row, baseUrl, now) {
     }
     const share = store.createShareInTransaction(row.meeting_id, Boolean(subscription.include_transcript), subscription.share_days, now, Boolean(subscription.allow_download));
     const shareUrl = `${baseUrl}/share#${share.token}`;
+    const meeting = store.db.prepare("SELECT completed_at,CASE WHEN json_valid(minutes) AND json_type(minutes,'$.meeting.topic')='text' THEN json_extract(minutes,'$.meeting.topic') ELSE NULL END AS title FROM meetings WHERE id=?").get(row.meeting_id);
+    const completedAt = meeting.completed_at ?? now;
     let payload, headers = { 'content-type': 'application/json' };
     if (subscription.channel === 'wecom') {
-      const meeting = store.db.prepare("SELECT completed_at,CASE WHEN json_valid(minutes) AND json_type(minutes,'$.meeting.topic')='text' THEN json_extract(minutes,'$.meeting.topic') ELSE NULL END AS title FROM meetings WHERE id=?").get(row.meeting_id);
-      payload = buildWecomCard({ title: meeting.title, meetingId: row.meeting_id, completedAt: meeting.completed_at ?? now, shareUrl, shareExpiresAt: share.expiresAt });
+      payload = buildWecomCard({ title: meeting.title, meetingId: row.meeting_id, completedAt, shareUrl, shareExpiresAt: share.expiresAt });
     } else {
-      payload = { event: 'meeting.minutes.completed', eventId: row.event_id, meetingId: row.meeting_id, shareUrl, shareExpiresAt: share.expiresAt };
+      payload = { event: 'meeting.minutes.completed', eventId: row.event_id, meetingId: row.meeting_id, title: cleanMeetingTitle(meeting.title, row.meeting_id), completedAt, shareUrl, shareExpiresAt: share.expiresAt };
       if (subscription.allow_download) payload.downloadUrls = { minutes: `${baseUrl}/share/download/minutes`, transcript: `${baseUrl}/share/download/transcript` };
       if (subscription.callback_token) headers.authorization = `Bearer ${subscription.callback_token}`;
     }

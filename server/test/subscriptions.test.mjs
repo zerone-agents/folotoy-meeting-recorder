@@ -5,12 +5,14 @@ import { MeetingStore } from '../src/store.mjs';
 import { SubscriptionStore, drainSubscriptions, publicBaseUrl } from '../src/subscriptions.mjs';
 import { createMeetingRouter } from '../src/routes.mjs';
 
-function completedMeeting(store, id = 'm') {
+const completedAt = (store, id) => store.db.prepare('SELECT completed_at AS completedAt FROM meetings WHERE id=?').get(id).completedAt;
+
+function completedMeeting(store, id = 'm', title = null) {
   const audio = Buffer.from(`audio-${id}`), digest = createHash('sha256').update(audio).digest('hex');
   store.create('d', id);store.put('d', id, 0, audio, digest);
   store.finalize('d', id, { count: 1, bytes: audio.length, digest, reason: 'user' });
   store.publish(store.claim(id, 'queued'), JSON.stringify({ versionId: `v-${id}`, segments: [{ id: 's0', text: 'private transcript' }] }));
-  store.publish(store.claim(id, 'minutes_queued'), JSON.stringify({ summary: 'completed minutes' }));
+  store.publish(store.claim(id, 'minutes_queued'), JSON.stringify({ summary: 'completed minutes', ...(title === null ? {} : { meeting: { topic: title } }) }));
 }
 
 test('only approved subscriptions receive newly completed minutes as a minutes-only share', async () => {
@@ -28,6 +30,8 @@ test('only approved subscriptions receive newly completed minutes as a minutes-o
     const event = JSON.parse(request.options.body);
     assert.equal(event.event, 'meeting.minutes.completed');
     assert.equal(event.meetingId, 'm');
+    assert.equal(event.title, 'm');
+    assert.equal(event.completedAt, completedAt(store, 'm'));
     assert.match(event.shareUrl, /^https:\/\/meetings\.example\/meeting-service\/share#[A-Za-z0-9_-]{43}$/);
     const token = event.shareUrl.split('#')[1], shared = store.readShare(token);
     assert.match(shared.minutesMarkdown, /completed minutes/);
@@ -37,6 +41,18 @@ test('only approved subscriptions receive newly completed minutes as a minutes-o
     assert.ok(event.shareExpiresAt > Math.floor(Date.now() / 1000) + 6 * 86400);
     assert.equal(subscriptions.deliveries()[0].deliveredAt > 0, true);
     assert.equal(store.db.prepare('SELECT COUNT(*) AS n FROM subscription_deliveries WHERE subscription_id=?').get(pending.id).n, 0);
+  } finally { store.close(); }
+});
+
+test('callback includes the cleaned meeting title and completion time', async () => {
+  const store = new MeetingStore(':memory:'), subscriptions = new SubscriptionStore(store.db);
+  try {
+    const { id } = subscriptions.apply('service', 'https://subscriber.example/hooks');subscriptions.review(id, true);
+    completedMeeting(store, 'm', '  产品\u0000\n  周会  ');
+    let event;
+    await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', now: () => 2000, fetchImpl: async (_url, options) => { event = JSON.parse(options.body);return new Response(null, { status: 200 }); } });
+    assert.equal(event.title, '产品 周会');
+    assert.equal(event.completedAt, completedAt(store, 'm'));
   } finally { store.close(); }
 });
 

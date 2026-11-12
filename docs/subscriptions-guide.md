@@ -69,10 +69,14 @@ curl -X POST 'https://meetings.example.com/meeting-service/subscriptions' \
   "event": "meeting.minutes.completed",
   "eventId": "全局唯一事件 ID",
   "meetingId": "会议 ID",
+  "title": "产品周会",
+  "completedAt": 1799900000,
   "shareUrl": "https://meetings.example.com/meeting-service/share#分享凭证",
   "shareExpiresAt": 1799999999
 }
 ```
+
+`title` 是清理后的会议名称，缺失或空白时回退为 `meetingId`；`completedAt` 是纪要完成时间的 Unix 秒。旧版本回调可能不包含这两个新增字段，订阅方应宽容解析并提供回退显示。
 
 当“允许下载”开启时，回调还包含两个下载地址：
 
