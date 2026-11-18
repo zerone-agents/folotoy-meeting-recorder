@@ -21,22 +21,20 @@ static atomic_int page_request;
 static atomic_int selected_index=ATOMIC_VAR_INIT(-1);
 static atomic_uint displayed_selection_id;
 static atomic_bool keep_awake;
-static lv_obj_t *title,*body,*footer,*status,*battery_fill,*battery_unknown;
+static lv_obj_t *title,*body,*config_wifi_row,*config_wifi_name,*config_ble_row,*config_ble_name,*footer,*network_icon,*wifi_slash,*battery_fill,*battery_unknown;
 /* Recording metadata is immutable after creation; avoid reading NVS every
  * 200 ms from the display task. File IDs are never reused. */
 typedef struct { uint32_t id; int64_t epoch; bool known; } display_time;
 static display_time display_times[ROWS];
 static size_t display_start=(size_t)-1;
-static const char *network_text(meeting_network_state state)
+static const char *upload_detail_text(meeting_network_state state)
 {
     switch(state){
-    case MEETING_NETWORK_CONNECTING:return "正在连接 Wi-Fi";
     case MEETING_NETWORK_CLOCK_REQUIRED:return "等待同步时间";
     case MEETING_NETWORK_SYNCING:return "正在上传";
-    case MEETING_NETWORK_IDLE:return "网络已连接";
     case MEETING_NETWORK_RETRY:return "等待重新上传";
     case MEETING_NETWORK_STOPPING:return "正在停止上传";
-    default:return "未联网";
+    default:return "";
     }
 }
 
@@ -57,8 +55,14 @@ static void refresh(lv_timer_t *timer)
     bool setup=s.setup.state!=MEETING_SETUP_IDLE;
     bool wifi=s.link>=SC_LINK_WIFI_PENDING;
     atomic_store(&keep_awake,setup||wifi);
-    lv_label_set_text(status,setup?"配置中":wifi?"导出中":
-                      s.rec_status==SC_REC_RECORDING?"录音中":"就绪");
+    bool wifi_connecting=!s.wifi_has_ip&&s.connected_ssid[0];
+    bool show_slash=!s.config_ble_active&&!s.wifi_has_ip&&!wifi_connecting;
+    lv_label_set_text(network_icon,s.config_ble_active?LV_SYMBOL_BLUETOOTH:LV_SYMBOL_WIFI);
+    bool blink=s.config_ble_active?!s.config_ble_authenticated:wifi_connecting;
+    lv_obj_set_style_opa(network_icon,
+        blink&&(lv_tick_get()/500)%2?LV_OPA_TRANSP:LV_OPA_COVER,0);
+    if(show_slash)lv_obj_remove_flag(wifi_slash,LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(wifi_slash,LV_OBJ_FLAG_HIDDEN);
     if(s.battery_soc>=0&&s.battery_soc<=100){
         lv_obj_add_flag(battery_unknown,LV_OBJ_FLAG_HIDDEN);
         if(s.battery_soc==0)lv_obj_add_flag(battery_fill,LV_OBJ_FLAG_HIDDEN);
@@ -66,6 +70,15 @@ static void refresh(lv_timer_t *timer)
     }else{
         lv_obj_add_flag(battery_fill,LV_OBJ_FLAG_HIDDEN);
         lv_obj_remove_flag(battery_unknown,LV_OBJ_FLAG_HIDDEN);
+    }
+    int page=atomic_load(&page_request);
+    if(page!=2||setup||wifi||!s.storage_ready||s.delete_review_busy||
+       s.delete_review.stage!=MEETING_DELETE_UI_IDLE){
+        lv_obj_add_flag(config_wifi_row,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(config_wifi_name,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(config_ble_row,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(config_ble_name,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_y(body,95);
     }
     if(setup){
         if(s.setup.state==MEETING_SETUP_PAIRING){
@@ -114,13 +127,13 @@ static void refresh(lv_timer_t *timer)
                               s.password[0]?s.password:"无密码",(unsigned long)s.wifi_files);
         lv_label_set_text(footer,"长按 OK 停止");return;
     }
-    int page=atomic_load(&page_request);
     if(page==0){
         lv_label_set_text(title,"会议录音");
-        lv_label_set_text_fmt(body,"%s\n\n%02lu:%02lu\n\n录音: %lu 条\n剩余: %lu KB\n%s",
+        const char *detail=upload_detail_text(s.network);
+        lv_label_set_text_fmt(body,"%s\n\n%02lu:%02lu\n\n录音 %lu 条 | 剩余 %lu KB%s%s",
             s.rec_status==SC_REC_RECORDING?"录音中":s.rec_status==SC_REC_PAUSED?"已暂停":"准备录音",
             (unsigned long)(s.rec_seconds/60),(unsigned long)(s.rec_seconds%60),
-            (unsigned long)s.file_count,(unsigned long)s.free_kb,network_text(s.network));
+            (unsigned long)s.file_count,(unsigned long)s.free_kb,detail[0]?"\n":"",detail);
         lv_label_set_text(footer,s.toast[0]?sc_ui_toast_text(s.toast):
                           s.rec_status==SC_REC_RECORDING?"OK 暂停 | 长按保存":
                           s.rec_status==SC_REC_PAUSED?"OK 继续 | 长按保存":"OK 录音 | 长按保存");
@@ -156,13 +169,34 @@ static void refresh(lv_timer_t *timer)
         lv_label_set_text(body,text);atomic_store(&displayed_selection_id,displayed);
         lv_label_set_text(footer,s.toast[0]?sc_ui_toast_text(s.toast):(selected<0?"OK 选择 | 上下翻页":"上下选择 | 长按删除"));
     }else{
-        lv_label_set_text(title,"设备");
+        lv_label_set_text(title,"配置");
         char zone[24]="";
         if(s.timezone_known){int minutes=s.timezone_minutes;char sign=minutes<0?'-':'+';if(minutes<0)minutes=-minutes;
             snprintf(zone,sizeof(zone)," (UTC%c%02d:%02d)",sign,minutes/60,minutes%60);}
-        lv_label_set_text_fmt(body,"设备编号\n%s\n\n时间: %s%s\n可用空间: %lu KB\n\n长按 OK 配置",s.serial,
+        const char *wifi_state=s.wifi_has_ip?"已连接":wifi_connecting?"连接中":
+                               s.wifi_ap_missing?"未找到":"未连接";
+        const char *ble_state=!s.config_ble_active?"未启用":s.config_ble_authenticated?"已连接":
+                              s.config_ble_connected?"连接中":"等待连接";
+        char *ssid=s.connected_ssid[0]?s.connected_ssid:s.target_ssid;
+        for(char *c=ssid;*c;c++){
+            if((unsigned char)*c<32||*c==127)*c=' ';
+        }
+        lv_label_set_text_fmt(config_wifi_row,"Wi-Fi: %s",wifi_state);
+        /* Replacing the label text on every refresh restarts its scroll. */
+        if(strcmp(lv_label_get_text(config_wifi_name),ssid))
+            lv_label_set_text(config_wifi_name,ssid);
+        lv_obj_remove_flag(config_wifi_row,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(config_wifi_name,LV_OBJ_FLAG_HIDDEN);
+        lv_label_set_text_fmt(config_ble_row,"蓝牙: %s",ble_state);
+        if(strcmp(lv_label_get_text(config_ble_name),s.config_peer_name))
+            lv_label_set_text(config_ble_name,s.config_peer_name);
+        lv_obj_remove_flag(config_ble_row,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(config_ble_name,LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_y(body,95+2*(meeting_font_16.line_height+5));
+        lv_label_set_text_fmt(body,"\n设备编号\n%s\n时间: %s%s\n可用空间: %lu KB",
+                              s.serial,
                               s.time_synced?"已同步":s.time_checking?"检查中":"未同步",zone,(unsigned long)s.free_kb);
-        lv_label_set_text(footer,s.toast[0]?sc_ui_toast_text(s.toast):"上下键切换页面");
+        lv_label_set_text(footer,s.toast[0]?sc_ui_toast_text(s.toast):s.config_ble_active?"长按 OK 取消":"长按 OK 启用蓝牙配置");
     }
 }
 
@@ -171,7 +205,14 @@ esp_err_t sc_ui_init(void)
     lv_obj_t *screen=lv_obj_create(NULL);lv_obj_set_scrollable(screen,false);
     lv_obj_set_style_bg_color(screen,lv_color_hex(BG),0);
     lv_obj_set_style_bg_opa(screen,LV_OPA_COVER,0);
-    status=make_text(screen,&meeting_font_16,20,20,120,BLUE);
+    network_icon=make_text(screen,LV_FONT_DEFAULT,20,20,19,BLUE);
+    static const lv_point_precise_t slash_points[]={{0,15},{16,0}};
+    wifi_slash=lv_line_create(screen);
+    lv_line_set_points(wifi_slash,slash_points,2);
+    lv_obj_set_pos(wifi_slash,20,21);
+    lv_obj_set_style_line_width(wifi_slash,2,0);
+    lv_obj_set_style_line_color(wifi_slash,lv_color_hex(BLUE),0);
+
     lv_obj_t *battery_frame=lv_obj_create(screen);
     lv_obj_set_pos(battery_frame,195,22);lv_obj_set_size(battery_frame,22,12);
     lv_obj_set_scrollable(battery_frame,false);
@@ -195,6 +236,12 @@ esp_err_t sc_ui_init(void)
     lv_label_set_text(battery_unknown,"?");
     title=make_text(screen,&meeting_font_16,20,55,200,INK);
     body=make_text(screen,&meeting_font_16,20,95,200,INK);
+    config_wifi_row=make_text(screen,&meeting_font_16,20,95,200,INK);
+    config_wifi_name=make_text(screen,&meeting_font_16,116,95,104,INK);
+    lv_label_set_long_mode(config_wifi_name,LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
+    config_ble_row=make_text(screen,&meeting_font_16,20,95+meeting_font_16.line_height+5,200,INK);
+    config_ble_name=make_text(screen,&meeting_font_16,116,95+meeting_font_16.line_height+5,104,INK);
+    lv_label_set_long_mode(config_ble_name,LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
     footer=make_text(screen,&meeting_font_16,20,282,200,MUTED);
     lv_screen_load(screen);refresh(NULL);lv_timer_create(refresh,200,NULL);return ESP_OK;
 }
@@ -202,6 +249,7 @@ void sc_ui_page_step(int delta)
 {
     int page=atomic_load(&page_request);page=(page+delta+3)%3;atomic_store(&page_request,page);
 }
+bool sc_ui_device_page(void){return atomic_load(&page_request)==2;}
 bool sc_ui_wifi_page(void){return atomic_load(&keep_awake);}
 bool sc_ui_handle_key(bsp_btn_t btn,bsp_btn_ev_t event)
 {

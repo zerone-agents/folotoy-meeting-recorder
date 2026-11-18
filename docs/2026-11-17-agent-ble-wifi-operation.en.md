@@ -1,8 +1,6 @@
 # Agent Bluetooth Wi-Fi Switching
 
-This guide describes the recording-first, idle Bluetooth switching prototype. Management Bluetooth is unavailable during recording and becomes discoverable when the device is idle. Device tests have covered switching between two networks, one physical power loss during a candidate trial, and power loss before and after committing a same-network candidate. Three paired uploads of the same 30-minute recording met the throughput thresholds; cross-network power loss and multi-run stability remain unverified. This guide is not a release-readiness claim.
-
-When idle without an effective upload, management windows use approximately 25 seconds of network opportunity and 8 seconds of advertising. An effective upload can hold the network for up to 120 seconds, so discovery during upload can take longer than 30 seconds. After 45 seconds without new server-confirmed progress, the device returns to ordinary scheduling. Draining, scanning and authentication add time, so these are not discovery guarantees. Recording always takes priority. A waiting message does not establish whether the device is recording, uploading or offline. See the device record for the three paired long-audio measurements and their conditions.
+When the device is idle, use the Up or Down button to reach Settings, then hold OK to enable Bluetooth configuration. The device continues advertising after the Agent disconnects. After the switch result is acknowledged, hold OK again in Settings to close Bluetooth and resume Wi-Fi and uploads. Recording takes priority over configuration. Settings shows the connected or configured Wi-Fi name and Bluetooth status.
 
 ## Preparation
 

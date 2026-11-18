@@ -16,3 +16,5 @@ void sc_ui_page_step(int delta);
 bool sc_ui_wifi_page(void);
 /* Returns true only for keys handled by the recording selection/review UI. */
 bool sc_ui_handle_key(bsp_btn_t btn,bsp_btn_ev_t event);
+
+bool sc_ui_device_page(void);

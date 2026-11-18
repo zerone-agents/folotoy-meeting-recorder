@@ -34,6 +34,16 @@ async def main():
     result=await send_request(packet,b'\x01'*32,'PASSPORT-SETUP',SecurityModule,TransportModule,discovery=discovery,bleak_module=Bleak,send=send,poll=poll)
     assert result==19
     assert called==[packet,b'ack']
+    called.clear()
+    async def legacy_poll(transport,security,payload):
+        if payload==b'\x06Recorder-Mac':
+            called.append(payload)
+            return b'\x01'
+        return await poll(transport,security,payload)
+    assert await send_request(packet,b'\x01'*32,'PASSPORT-SETUP',SecurityModule,
+        TransportModule,discovery=discovery,bleak_module=Bleak,send=send,poll=legacy_poll,
+        peer_name='Recorder-Mac')==19
+    assert called==[packet,b'\x06Recorder-Mac',b'ack']
     stale=SimpleNamespace(name='soundcore Work')
     partial_adv=SimpleNamespace(service_uuids=[SERVICE_UUID],local_name=None)
     result=await send_request(packet,b'\x01'*32,'PASSPORT-SETUP',SecurityModule,TransportModule,discovery={'a':(stale,partial_adv)},bleak_module=Bleak,send=send,poll=poll)

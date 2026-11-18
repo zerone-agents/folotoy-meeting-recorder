@@ -30,3 +30,6 @@ bool meeting_pairing_ble_session_valid(meeting_pairing_token token);
 bool meeting_pairing_ble_connected(void);
 /* True after an authenticated application request, until session reset. */
 bool meeting_pairing_ble_authenticated(void);
+
+#define MEETING_PAIRING_PEER_NAME_SIZE 33
+void meeting_pairing_ble_peer_name(char out[MEETING_PAIRING_PEER_NAME_SIZE]);

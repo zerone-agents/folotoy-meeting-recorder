@@ -11,3 +11,7 @@ bool meeting_management_controller_window_active(void);
 bool meeting_management_controller_window_connected(void);
 bool meeting_management_controller_window_authenticated(void);
 bool meeting_management_controller_trial_active(void);
+
+bool meeting_management_controller_request(void);
+void meeting_management_controller_cancel(void);
+bool meeting_management_controller_toggle(void);

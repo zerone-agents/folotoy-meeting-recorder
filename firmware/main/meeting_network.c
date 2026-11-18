@@ -137,6 +137,16 @@ void meeting_network_management_release(void)
     if(!atomic_load(&s_record_requested))atomic_store(&s_record_ready,false);
     if(meeting_network_enabled())notify_worker();
 }
+static char display_ssid[33];
+
+void meeting_network_target_ssid(char out[33])
+{
+    out[0]=0;
+    if(!s_lifecycle_lock||xSemaphoreTake(s_lifecycle_lock,0)!=pdTRUE)return;
+    if(meeting_network_enabled())memcpy(out,display_ssid,sizeof(display_ssid));
+    xSemaphoreGive(s_lifecycle_lock);
+}
+
 bool meeting_network_apply_wifi_slot(const meeting_wifi_slots_io *slots,uint64_t generation,
                                      const uint8_t request_id[16],const uint8_t digest[32])
 {
@@ -144,6 +154,10 @@ bool meeting_network_apply_wifi_slot(const meeting_wifi_slots_io *slots,uint64_t
     meeting_wifi_slot slot={0};unsigned index;
     bool ok=meeting_wifi_slots_load(slots,&slot,&index)==MEETING_WIFI_SLOTS_OK&&slot.generation==generation&&
         !memcmp(slot.request_id,request_id,16)&&!memcmp(slot.digest,digest,32)&&meeting_wifi_slot_apply(&s_config,&slot);
+    if(ok&&xSemaphoreTake(s_lifecycle_lock,portMAX_DELAY)==pdTRUE){
+        memcpy(display_ssid,slot.ssid,sizeof(display_ssid));
+        xSemaphoreGive(s_lifecycle_lock);
+    }
     volatile unsigned char *p=(volatile unsigned char *)&slot;for(size_t i=0;i<sizeof(slot);i++)p[i]=0;
     return ok;
 }
@@ -361,6 +375,7 @@ static esp_err_t activate(const meeting_config *config,const meeting_clock *cloc
         meeting_config_clear(&s_config);meeting_clock_reset(&s_clock);
         vSemaphoreDelete(s_clock_lock);s_clock_lock=NULL;return ESP_FAIL;
     }
+    memcpy(display_ssid,config->ssid,sizeof(display_ssid));
     atomic_store(&s_enabled,true);
     atomic_store(&s_state,MEETING_NETWORK_CONNECTING);
     BaseType_t created=xTaskCreate(task,"meeting_network",CONFIG_MEETING_NETWORK_TASK_STACK_SIZE,NULL,4,&s_task);
