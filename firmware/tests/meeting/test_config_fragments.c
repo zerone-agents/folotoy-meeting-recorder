@@ -4,11 +4,12 @@
 int main(void)
 {
     meeting_config_fragments s={0};const uint8_t *result;size_t length;
+    uint8_t bytes[MEETING_CONFIG_MAX_BYTES];assert(meeting_config_fragments_bind(&s,bytes,sizeof bytes));
     assert(!meeting_config_fragments_begin(&s,0,0));
     assert(meeting_config_fragments_begin(&s,0,6));
     assert(meeting_config_fragments_append(&s,0,0,(const uint8_t *)"abc",3));
     assert(!meeting_config_fragments_append(&s,0,0,(const uint8_t *)"abc",3)); /* replay */
-    for(size_t i=0;i<sizeof(s.bytes);i++)assert(s.bytes[i]==0);
+    for(size_t i=0;i<s.capacity;i++)assert(s.bytes[i]==0);
     assert(meeting_config_fragments_begin(&s,1,6));
     assert(meeting_config_fragments_append(&s,1,0,(const uint8_t *)"abc",3));
     assert(!meeting_config_fragments_append(&s,2,3,(const uint8_t *)"def",3)); /* new connection */

@@ -3,6 +3,7 @@
 #include "meeting_clock_nvs.h"
 #include "meeting_config_store_nvs.h"
 #include "meeting_network.h"
+#include "meeting_wifi_boot.h"
 #include "meeting_time_anchor_nvs.h"
 #include "meeting_agent_anchor.h"
 #include "meeting_commission.h"
@@ -44,6 +45,7 @@ esp_err_t meeting_restore_start(void)
  if(!meeting_config_store_nvs_bind(&config_handle,&store)||!meeting_time_anchor_nvs_bind(&anchor_handle,&anchor_io)||
     !meeting_clock_nvs_bind(&clock_handle,&clock_io)||
     meeting_config_store_load(&store,meeting_ca_validate_pem,NULL,scratch,config)!=MEETING_CONFIG_STORED)goto done;
+ if(!meeting_wifi_boot_restore(config))goto done;
  int64_t floor;if(clock_io.read_floor(clock_io.ctx,&floor)!=0)goto done;
  uint8_t origin_hash[32];meeting_time_anchor anchor;
  if(mbedtls_sha256((const uint8_t *)config->origin,strlen(config->origin),origin_hash,0)!=0)goto done;

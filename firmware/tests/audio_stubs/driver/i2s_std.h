@@ -2,6 +2,10 @@
 #include <stdbool.h>
 #include "esp_err.h"
 typedef struct test_channel *i2s_chan_handle_t;
+typedef struct { int unused; } i2s_event_data_t;
+typedef bool (*i2s_isr_callback_t)(i2s_chan_handle_t,i2s_event_data_t *,void *);
+typedef struct { i2s_isr_callback_t on_recv_q_ovf; } i2s_event_callbacks_t;
+esp_err_t i2s_channel_register_event_callback(i2s_chan_handle_t,const i2s_event_callbacks_t *,void *);
 typedef struct {
     int id, role, dma_desc_num, dma_frame_num;
     bool auto_clear_after_cb, auto_clear_before_cb;

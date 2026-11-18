@@ -1,6 +1,7 @@
 #pragma once
 #include "meeting_upload_session.h"
-/* Only call from the network worker while it owns Wi-Fi and the source lock.
+/* Only call after snapshot verification while holding the same source lock,
+ * from the network worker while it owns Wi-Fi.
  * Disconnect or recording start cancels the current session; no local deletion. */
 typedef struct {
  meeting_https_config https;

@@ -30,5 +30,9 @@ esp_err_t sc_audio_start(void);
  * recording ownership and may retry. */
 bool sc_audio_stop(void);
 bool sc_audio_running(void);
+/* Recording-wide fault is sticky across pause/resume. Reset only before a new
+ * recording while capture is quiescent; query after stop before sealing. */
+bool sc_audio_reset_capture_fault(void);
+bool sc_audio_capture_fault(void);
 // 最近一帧的电平 0..100(界面用)。
 uint8_t sc_audio_level(void);

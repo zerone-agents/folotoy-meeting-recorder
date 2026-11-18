@@ -36,6 +36,7 @@ static StackType_t s_task_stack[AUDIO_TASK_STACK / sizeof(StackType_t)];
 static SemaphoreHandle_t s_stopped;
 static atomic_bool s_run;
 static atomic_bool s_running;
+static atomic_bool s_capture_fault;
 static atomic_bool s_quiescent=true;
 static atomic_bool s_codec_prepared;
 static atomic_bool s_codec_needs_reset;
@@ -66,12 +67,18 @@ static void capture_loop(void)
     uint32_t frames = 0, bytes = 0;
     while (s_run) {
         if (bsp_audio_read(s_pcm, sizeof(s_pcm)) != ESP_OK) {
+            atomic_store(&s_capture_fault, true);
             ESP_LOGW(TAG, "bsp_audio_read 失败,丢一帧");
+            /* Some device errors return immediately rather than blocking for
+             * an audio frame. Bound retry rate and let lower-priority tasks run. */
+            TickType_t wait = pdMS_TO_TICKS(SC_AUDIO_FRAME_MS);
+            vTaskDelay(wait ? wait : 1);
             continue;
         }
         s_level = level_of(s_pcm, SC_AUDIO_FRAME_SAMPLES);
         int n = opus_encode(s_enc, s_pcm, SC_AUDIO_FRAME_SAMPLES, s_pkt, sizeof(s_pkt));
         if (n < 0) {
+            atomic_store(&s_capture_fault, true);
             ESP_LOGW(TAG, "opus_encode 失败: %d", n);
             continue;
         }
@@ -158,7 +165,7 @@ esp_err_t sc_audio_init(sc_audio_frame_cb_t cb, void *ctx)
     if(err!=ESP_OK){s_codec_needs_reset=true;return err;}
     err = encoder_init();
     if (err != ESP_OK) return err;
-    s_stopped = xSemaphoreCreateBinary();
+    if (!s_stopped) s_stopped = xSemaphoreCreateBinary();
     if (!s_stopped) return ESP_ERR_NO_MEM;
     s_task = xTaskCreateStatic(audio_task, "sc_audio", AUDIO_TASK_STACK / sizeof(StackType_t), NULL,
                                AUDIO_TASK_PRIO, s_task_stack, &s_task_tcb);
@@ -230,6 +237,19 @@ bool sc_audio_stop(void)
         return false;
     }
     return s_quiescent;
+}
+
+bool sc_audio_reset_capture_fault(void)
+{
+    if (s_run || s_running || !s_quiescent) return false;
+    bsp_audio_clear_rx_overflow();
+    atomic_store(&s_capture_fault, false);
+    return true;
+}
+
+bool sc_audio_capture_fault(void)
+{
+    return atomic_load(&s_capture_fault) || bsp_audio_rx_overflowed();
 }
 
 bool sc_audio_running(void)

@@ -144,7 +144,7 @@ def load_idf_modules():
     return security, transport
 
 
-def unique_setup_discovery(discovery, device_name):
+def unique_setup_discovery(discovery, device_name, *, allow_stale_cache=False):
     """Select the single advertised provisioning service, never a name alone."""
     matches = [(key, device, adv) for key, (device, adv) in discovery.items()
                if SERVICE_UUID in (uuid.lower() for uuid in adv.service_uuids)]
@@ -157,7 +157,7 @@ def unique_setup_discovery(discovery, device_name):
     advertised_name = getattr(adv, "local_name", None)
     if advertised_name and advertised_name != device_name:
         raise RuntimeError("provisioning device name mismatch")
-    if not advertised_name and device.name and device.name != device_name:
+    if not advertised_name and device.name and device.name != device_name and not allow_stale_cache:
         raise RuntimeError("provisioning device name mismatch")
     device.name = device_name  # ESP-IDF transport selects the scan by name.
     return {key: (device, adv)}

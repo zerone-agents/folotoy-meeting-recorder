@@ -1,15 +1,18 @@
 #include "meeting_scr1.h"
+#include <string.h>
 
 bool meeting_scr1_project(uint64_t offset, uint8_t *buffer, size_t length,
                           uint64_t valid_end, uint32_t frames)
 {
     if ((!buffer && length) || valid_end < 96 || !frames || frames > 90000 ||
         offset > valid_end || length > valid_end - offset) return false;
-    for (size_t i = 0; i < length; ++i) {
-        uint64_t pos = offset + i;
-        if (pos >= 20 && pos < 24) buffer[i] = (uint8_t)(frames >> ((pos - 20) * 8));
-        else if (pos >= 24 && pos < 72) buffer[i] = 0;
-    }
+    /* Only the header differs in the projected stream. Most reads are audio
+     * blocks, so avoid checking every byte of every 30-minute recording. */
+    uint64_t end=offset+length;
+    uint64_t first=offset>20?offset:20,limit=end<24?end:24;
+    for(uint64_t pos=first;pos<limit;pos++)buffer[(size_t)(pos-offset)]=(uint8_t)(frames>>((pos-20)*8));
+    first=offset>24?offset:24;limit=end<72?end:72;
+    if(first<limit)memset(buffer+(size_t)(first-offset),0,(size_t)(limit-first));
     return true;
 }
 

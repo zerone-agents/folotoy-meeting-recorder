@@ -20,6 +20,7 @@ bool meeting_https_test_preempt_ready(void){return atomic_load(&s_test_preempt_r
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 static const char *TAG="meeting_https";
 
 static bool origin_hostname(const char *s,char host[181])
@@ -134,16 +135,25 @@ static bool request(void *ctx,const char *method,const char *path,const char *ty
   }
  }
 #endif
-done:
+done:;
+ bool fallback=false;
  if(!ok&&!cancelled(c)){
   int tls_code=0,tls_flags=0;
   int detail=esp_http_client_get_and_clear_last_tls_error(client,&tls_code,&tls_flags);
+  /* Retry only a failed TLS handshake, before any HTTP body was sent. */
+  fallback=c->fallback_ca_pem&&c->fallback_ca_pem[0]&&!strcmp(stage,"open")&&tls_code==0x2700;
   int socket_errno=esp_http_client_get_errno(client);wifi_ap_record_t ap={0};bool have_ap=esp_wifi_sta_get_ap_info(&ap)==ESP_OK;
   ESP_LOGW(TAG,"Request failure: stage=%s reason=%s elapsed_ms=%u received=%u read=%d transport=%d detail=%d verify_flags=0x%x errno=%d heap_before=%u largest_before=%u heap_after=%u largest_after=%u wifi_connected=%d rssi=%d channel=%u",stage,reason,(unsigned)((esp_timer_get_time()-started)/1000),(unsigned)received,read_result,(int)detail,tls_code,(unsigned)tls_flags,socket_errno,(unsigned)heap_before,(unsigned)largest_before,(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),have_ap,(int)ap.rssi,(unsigned)ap.primary);
+  ESP_LOGW(TAG,"TLS target=%s wall_time=%lld",ip,(long long)time(NULL));
   (void)stage;(void)reason;(void)received;(void)read_result;(void)detail;(void)tls_code;(void)tls_flags;(void)socket_errno;(void)have_ap;
  }
  (void)started;(void)heap_before;(void)largest_before;
- memset(authorization,0,sizeof(authorization));if(!ok)meeting_https_close(c);return ok;
+ memset(authorization,0,sizeof(authorization));if(!ok)meeting_https_close(c);
+ if(fallback&&!cancelled(c)){
+  c->ca_pem=c->fallback_ca_pem;c->fallback_ca_pem=NULL;
+  return request(ctx,method,path,type,sha,body,body_len,status,response,cap,response_len);
+ }
+ return ok;
 }
 void meeting_https_close(meeting_https_config *c)
 {

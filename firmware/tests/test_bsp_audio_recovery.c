@@ -26,6 +26,8 @@ static bool tx_data_enabled, rx_data_enabled;
 static unsigned codec_creations, codec_starts, ctrl_creations, ctrl_deletions;
 static unsigned invalid_disable_calls;
 static bool read_reg0e_reserved_zero;
+static i2s_isr_callback_t overflow_callback;
+static int fail_overflow_registration;
 
 static int reg_write(const audio_codec_ctrl_if_t *ctrl, int reg, int reg_len,
                      void *value, int size) {
@@ -89,6 +91,11 @@ esp_err_t i2s_new_channel(const i2s_chan_config_t *cfg, i2s_chan_handle_t *tx,
 esp_err_t i2s_channel_init_std_mode(i2s_chan_handle_t channel, const i2s_std_config_t *cfg) {
     channel->hz = cfg->clk_cfg.sample_rate_hz;
     return ESP_OK;
+}
+esp_err_t i2s_channel_register_event_callback(i2s_chan_handle_t channel,const i2s_event_callbacks_t *callbacks,void *ctx) {
+    (void)ctx;assert(channel==&rx_channel&&!channel->running);
+    if(fail_overflow_registration)return ESP_FAIL;
+    overflow_callback=callbacks->on_recv_q_ovf;return ESP_OK;
 }
 esp_err_t i2s_channel_enable(i2s_chan_handle_t channel) {
     if (channel->running) return ESP_ERR_INVALID_STATE;
@@ -274,7 +281,14 @@ static void assert_active(void) {
 }
 
 int main(void) {
+    fail_overflow_registration=1;
+    assert(bsp_audio_init()!=ESP_OK&&!s_initialized&&!s_tx&&!s_rx);
+    fail_overflow_registration=0;
     fresh();
+    assert(overflow_callback&&!bsp_audio_rx_overflowed());
+    assert(!overflow_callback(&rx_channel,NULL,NULL));
+    assert(bsp_audio_rx_overflowed());
+    bsp_audio_clear_rx_overflow();assert(!bsp_audio_rx_overflowed());
     assert(bsp_audio_sleep() == ESP_OK);
     invalid_disable_calls = 0;
     assert(bsp_audio_wake() == ESP_OK);

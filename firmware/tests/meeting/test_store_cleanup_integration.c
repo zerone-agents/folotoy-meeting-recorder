@@ -2,8 +2,10 @@
 #include "sc_store.h"
 #include "meeting_record_nvs.h"
 #include "meeting_seal.h"
+#include "meeting_retirement.h"
 #include "meeting_cancel_request.h"
 #include "meeting_upload.h"
+#include "meeting_store_upload.h"
 #include "esp_littlefs.h"
 #include "freertos/semphr.h"
 #include <mbedtls/sha256.h>
@@ -15,14 +17,18 @@
 #include <unistd.h>
 
 typedef struct {int handle;char key[16];uint8_t value[256];size_t length;} entry;
-static entry entries[64];static int fail_index_unlink,fail_erase_handle,fail_seal_write,fail_delete_progress;
+static uint32_t test_crc32(const uint8_t *p,size_t n){uint32_t c=~0u;for(size_t i=0;i<n;i++){c^=p[i];for(unsigned j=0;j<8;j++)c=(c>>1)^(0xedb88320u&(0u-(c&1u)));}return ~c;}
+static unsigned online_calls;
+meeting_upload_result meeting_online_session(FILE *f,const meeting_snapshot *s,bool ht,int64_t rt,uint8_t trust,const meeting_online_config *c,meeting_manifest *m)
+{(void)f;(void)s;(void)ht;(void)rt;(void)trust;(void)c;(void)m;online_calls++;return MEETING_UPLOAD_FAILED;}
+static entry entries[64];static int fail_index_unlink,fail_erase_handle,fail_seal_write,fail_delete_progress,fail_record_write,fail_retired_open,fail_retired_read,retired_namespace_missing;
 struct fake_nvs_iterator {int position,handle;};static struct fake_nvs_iterator iterator;
 static int namespace_id(const char *s){if(!strcmp(s,"meeting_rec"))return 1;if(!strcmp(s,"meeting_snap"))return 2;if(!strcmp(s,"meeting_ack"))return 3;if(!strcmp(s,"meeting_clean"))return 4;if(!strcmp(s,"meeting_done"))return 5;if(!strcmp(s,"meeting_dproof"))return 7;return 6;}
 static entry *find_entry(int h,const char *key){for(size_t i=0;i<64;i++)if(entries[i].handle==h&&!strcmp(entries[i].key,key))return &entries[i];return NULL;}
-esp_err_t nvs_open(const char *s,int mode,nvs_handle_t *h){(void)mode;*h=namespace_id(s);return ESP_OK;}
+esp_err_t nvs_open(const char *s,int mode,nvs_handle_t *h){(void)mode;if(!strcmp(s,"meeting_done")){if(fail_retired_open)return ESP_FAIL;if(retired_namespace_missing)return ESP_ERR_NVS_NOT_FOUND;}*h=namespace_id(s);return ESP_OK;}
 void nvs_close(nvs_handle_t h){(void)h;}
-esp_err_t nvs_get_blob(nvs_handle_t h,const char *key,void *out,size_t *len){entry *e=find_entry(h,key);if(!e)return ESP_ERR_NVS_NOT_FOUND;if(!out){*len=e->length;return ESP_OK;}if(*len<e->length)return ESP_ERR_NVS_INVALID_LENGTH;memcpy(out,e->value,e->length);*len=e->length;return ESP_OK;}
-esp_err_t nvs_set_blob(nvs_handle_t h,const char *key,const void *data,size_t len){if(fail_seal_write&&h==1&&key[0]=='s')return ESP_FAIL;if(fail_delete_progress&&h==6&&!strcmp(key,"x0000000e1"))return ESP_FAIL;entry *e=find_entry(h,key);if(!e){for(size_t i=0;i<64;i++)if(!entries[i].handle){e=&entries[i];e->handle=h;strcpy(e->key,key);break;}}assert(e&&len<=sizeof(e->value));memcpy(e->value,data,len);e->length=len;return ESP_OK;}
+esp_err_t nvs_get_blob(nvs_handle_t h,const char *key,void *out,size_t *len){if(fail_retired_read&&h==5)return ESP_FAIL;entry *e=find_entry(h,key);if(!e)return ESP_ERR_NVS_NOT_FOUND;if(!out){*len=e->length;return ESP_OK;}if(*len<e->length)return ESP_ERR_NVS_INVALID_LENGTH;memcpy(out,e->value,e->length);*len=e->length;return ESP_OK;}
+esp_err_t nvs_set_blob(nvs_handle_t h,const char *key,const void *data,size_t len){if(fail_record_write&&h==1&&key[0]=='r')return ESP_FAIL;if(fail_seal_write&&h==1&&key[0]=='s')return ESP_FAIL;if(fail_delete_progress&&h==6&&!strcmp(key,"x0000000e1"))return ESP_FAIL;entry *e=find_entry(h,key);if(!e){for(size_t i=0;i<64;i++)if(!entries[i].handle){e=&entries[i];e->handle=h;strcpy(e->key,key);break;}}assert(e&&len<=sizeof(e->value));memcpy(e->value,data,len);e->length=len;return ESP_OK;}
 esp_err_t nvs_commit(nvs_handle_t h){(void)h;return ESP_OK;}
 esp_err_t nvs_erase_key(nvs_handle_t h,const char *key){if(h==fail_erase_handle)return ESP_FAIL;entry *e=find_entry(h,key);if(!e)return ESP_ERR_NVS_NOT_FOUND;memset(e,0,sizeof(*e));return ESP_OK;}
 static esp_err_t next_entry(nvs_iterator_t *it,int start){for(int p=start;p<64;p++)if(entries[p].handle==iterator.handle){iterator.position=p;*it=&iterator;return ESP_OK;}*it=NULL;return ESP_ERR_NVS_NOT_FOUND;}
@@ -39,7 +45,7 @@ esp_err_t esp_littlefs_info(const char *partition,size_t *total,size_t *used){(v
 void mbedtls_sha256_init(mbedtls_sha256_context *c){c->value=1;}
 int mbedtls_sha256_starts(mbedtls_sha256_context *c,int x){(void)x;c->value=1;return 0;}
 int mbedtls_sha256_update(mbedtls_sha256_context *c,const unsigned char *p,size_t n){for(size_t i=0;i<n;i++)c->value=c->value*33+p[i];return 0;}
-int mbedtls_sha256_finish(mbedtls_sha256_context *c,unsigned char out[32]){for(int i=0;i<64;i++)out[i]=(unsigned char)(c->value>>((i%4)*8));return 0;}
+int mbedtls_sha256_finish(mbedtls_sha256_context *c,unsigned char out[32]){for(int i=0;i<32;i++)out[i]=(unsigned char)(c->value>>((i%4)*8));return 0;}
 void mbedtls_sha256_free(mbedtls_sha256_context *c){(void)c;}
 void esp_fill_random(void *buffer,size_t length){memset(buffer,1,length);}
 void sc_crypto_random(uint8_t *buffer,size_t length){memset(buffer,2,length);}
@@ -69,6 +75,49 @@ int main(void)
     source=sc_store_upload_acquire(7);assert(source);meeting_manifest manifest;
     assert(meeting_upload_manifest(source,&snapshot,false,0,0,&manifest));assert(sc_store_confirm_upload(source,&snapshot,&manifest)==ESP_OK);
     assert(sc_store_upload_release(source)==ESP_OK);
+    /* An unknown, CRC-valid snapshot alongside a known slot must not authorize cleanup. */
+    entry *old_snapshot=find_entry(2,"m000000070");assert(old_snapshot && old_snapshot->length==MEETING_SNAPSHOT_SIZE);
+    uint8_t future[MEETING_SNAPSHOT_SIZE];memcpy(future,old_snapshot->value,sizeof future);future[77]=1;
+    uint32_t crc=test_crc32(future,84);for(unsigned i=0;i<4;i++)future[84+i]=(uint8_t)(crc>>(8*i));
+    assert(nvs_set_blob(2,"m000000071",future,sizeof future)==ESP_OK);
+    source=sc_store_upload_acquire(7);assert(source);
+    assert(sc_store_prepare_snapshot(7,&snapshot,not_cancelled,NULL)!=ESP_OK);
+    assert(sc_store_upload_release(source)==ESP_OK);
+    meeting_online_config upload_cfg={.https={.is_cancelled=not_cancelled}};
+    assert(meeting_store_upload(7,false,0,0,&upload_cfg)==MEETING_UPLOAD_FAILED && online_calls==0);
+    sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK);
+    assert(meeting_store_upload(7,false,0,0,&upload_cfg)==MEETING_UPLOAD_FAILED && online_calls==0);
+    source=sc_store_upload_acquire(7);assert(source);
+    assert(sc_store_prepare_snapshot(7,&snapshot,not_cancelled,NULL)!=ESP_OK);
+    assert(sc_store_upload_release(source)==ESP_OK);
+    assert(sc_store_cleanup_confirmed(7,not_cancelled,NULL)==MEETING_CLEANUP_ERROR);
+    assert(access(audio,F_OK)==0 && access(index,F_OK)==0 && find_entry(3,"c00000007") && !find_entry(4,"c00000007"));
+    /* Unknown format remains unknown to deletion; even an explicit unknown-state
+     * intent cannot create the required proof or remove the recording. */
+    assert(sc_store_delete_visibility(7,not_cancelled,NULL)==MEETING_DELETE_UNKNOWN);
+    assert(sc_store_begin_delete_checked(7,MEETING_DELETE_UNCONFIRMED,not_cancelled,NULL)==ESP_ERR_INVALID_STATE);
+    assert(sc_store_begin_delete_checked(7,MEETING_DELETE_UNKNOWN,not_cancelled,NULL)==ESP_OK);
+    assert(sc_store_prepare_delete_proof(7,not_cancelled,NULL)!=ESP_OK);
+    assert(sc_store_finish_delete_local(7,not_cancelled,NULL)!=ESP_OK);
+    assert(access(audio,F_OK)==0 && access(index,F_OK)==0 && find_entry(6,"x000000070"));
+    sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK);
+    assert(find_entry(6,"x000000070") && access(audio,F_OK)==0 && access(index,F_OK)==0);
+    assert(!sc_store_upload_acquire(7));
+    assert(sc_store_begin_delete_checked(7,MEETING_DELETE_UNKNOWN,not_cancelled,NULL)==ESP_OK);
+    assert(sc_store_prepare_delete_proof(7,not_cancelled,NULL)!=ESP_OK);
+    assert(sc_store_finish_delete_local(7,not_cancelled,NULL)!=ESP_OK);
+    assert(find_entry(6,"x000000070") && access(audio,F_OK)==0 && access(index,F_OK)==0);
+    assert(nvs_erase_key(6,"x000000070")==ESP_OK);
+    /* A pre-existing cleanup intent must also fail closed on reboot. */
+    entry *ack=find_entry(3,"c00000007");assert(ack);
+    assert(nvs_set_blob(4,"c00000007",ack->value,ack->length)==ESP_OK);
+    sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK);
+    assert(sc_store_cleanup_recovery_failed());
+    assert(access(audio,F_OK)==0 && access(index,F_OK)==0 && find_entry(3,"c00000007") && find_entry(4,"c00000007"));
+    assert(sc_store_resume_cleanups(not_cancelled,NULL)==MEETING_CLEANUP_ERROR);
+    assert(access(audio,F_OK)==0 && access(index,F_OK)==0 && find_entry(4,"c00000007"));
+    assert(nvs_erase_key(4,"c00000007")==ESP_OK);
+    assert(nvs_erase_key(2,"m000000071")==ESP_OK);
     f=fopen(audio,"r+b");assert(f&&fseek(f,99,SEEK_SET)==0&&fputc(0xfd,f)!=EOF&&fclose(f)==0);
     assert(sc_store_cleanup_confirmed(7,not_cancelled,NULL)==MEETING_CLEANUP_ERROR);
     assert(access(audio,F_OK)==0&&access(index,F_OK)==0&&!find_entry(4,"c00000007"));
@@ -97,6 +146,10 @@ int main(void)
     sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK&&sc_store_ready());
     assert(sc_store_has_empty_interrupted()&&sc_store_count()==1&&access(audio,F_OK)==0);
     sc_file_entry_t empty;assert(sc_store_list(&empty,1)==1&&empty.file_id==8&&empty.size==0);
+    /* Identity persistence failure prevents file creation and recording start. */
+    char rejected_audio[128];snprintf(rejected_audio,sizeof(rejected_audio),"%s/rec/10.dat",SC_STORE_BASE_PATH);
+    fail_record_write=1;assert(sc_store_begin_timed(10,1800000000,1800000000)!=ESP_OK);
+    assert(access(rejected_audio,F_OK)!=0&&sc_store_count()==1&&sc_store_ready());fail_record_write=0;
     assert(sc_store_begin_timed(9,1800000000,1800000000)==ESP_OK);
     bool time_present=false;int64_t capture_time=0;uint8_t time_trust=0;
     assert(sc_store_record_time(9,&time_present,&capture_time,&time_trust)&&time_present&&capture_time==1800000000&&time_trust==2);
@@ -118,6 +171,23 @@ int main(void)
     assert(access(index,F_OK)==0); /* damaged proof must not delete the audio */
     seal->value[8]^=1;
     sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK&&sc_store_ready());
+    /* A valid retired marker alongside a retained audio file is inconsistent.
+     * Recovery must not make this retired file eligible for upload. */
+    meeting_record rec9;assert(meeting_record_nvs_read(1,9,&rec9)==MEETING_RECORD_OK);
+    meeting_retired retired9={.file_id=9,.complete=true};memcpy(retired9.meeting_id,rec9.meeting_id,16);
+    uint8_t retired_bytes[MEETING_RETIRED_SIZE];assert(meeting_retired_encode(&retired9,retired_bytes));
+    assert(nvs_set_blob(5,"d00000009",retired_bytes,sizeof retired_bytes)==ESP_OK);
+    sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK&&sc_store_cleanup_recovery_failed());
+    assert(!sc_store_upload_acquire(9));assert(access(index,F_OK)==0);
+    source=sc_store_upload_acquire(8);assert(source&&sc_store_upload_release(source)==ESP_OK);
+    entry *retired_entry=find_entry(5,"d00000009");assert(retired_entry);
+    retired9.complete=false;assert(meeting_retired_encode(&retired9,retired_entry->value));
+    assert(!sc_store_upload_acquire(9));retired9.complete=true;assert(meeting_retired_encode(&retired9,retired_entry->value));
+    retired_entry->value[0]^=1;assert(!sc_store_upload_acquire(9));retired_entry->value[0]^=1;
+    fail_retired_read=1;assert(!sc_store_upload_acquire(9));fail_retired_read=0;
+    fail_retired_open=1;assert(!sc_store_upload_acquire(9));fail_retired_open=0;
+    assert(nvs_erase_key(5,"d00000009")==ESP_OK);sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK&&!sc_store_cleanup_recovery_failed());
+    retired_namespace_missing=1;source=sc_store_upload_acquire(9);assert(source&&sc_store_upload_release(source)==ESP_OK);retired_namespace_missing=0;
     source=sc_store_upload_acquire(9);assert(source);
     assert(sc_store_begin_delete_checked(9,MEETING_DELETE_UNCONFIRMED,not_cancelled,NULL)==ESP_ERR_INVALID_STATE); /* wait for upload ownership */
     assert(sc_store_upload_release(source)==ESP_OK);
@@ -244,7 +314,16 @@ int main(void)
     assert(sc_store_finish_delete_local(8,not_cancelled,NULL)==ESP_OK&&access(audio,F_OK)!=0);
     assert(!sc_store_has_empty_interrupted()&&!sc_store_upload_acquire(8)&&sc_store_begin(8,0)!=ESP_OK);
     remote_before=remote_calls;assert(sc_store_cancel_delete_remote(8,&remote)==ESP_OK&&remote_calls==remote_before);
+    /* A failed end-intent commit retains audio and recovers as interrupted. */
+    assert(sc_store_begin(16,0)==ESP_OK&&sc_store_append(frame,sizeof frame)==ESP_OK);
+    fail_record_write=1;assert(sc_store_end(0,1)!=ESP_OK&&!sc_store_ready());fail_record_write=0;
+    snprintf(index,sizeof(index),"%s/rec/16.dat",SC_STORE_BASE_PATH);assert(access(index,F_OK)==0);
+    sc_store_test_simulate_reboot();assert(sc_store_init()==ESP_OK&&sc_store_ready());
+    source=sc_store_upload_acquire(16);assert(source&&sc_store_prepare_snapshot(16,&snapshot,not_cancelled,NULL)==ESP_OK&&snapshot.reason==3);
+    assert(sc_store_upload_release(source)==ESP_OK&&access(index,F_OK)==0);
     /* The following cleanup is for this host fixture only. */
+    snprintf(index,sizeof(index),"%s/rec/16.dat",SC_STORE_BASE_PATH);unlink(index);
+    snprintf(index,sizeof(index),"%s/rec/16.idx",SC_STORE_BASE_PATH);unlink(index);
     snprintf(index,sizeof(index),"%s/rec/9.dat",SC_STORE_BASE_PATH);unlink(index);
     snprintf(index,sizeof(index),"%s/rec/9.idx",SC_STORE_BASE_PATH);unlink(index);
     snprintf(index,sizeof(index),"%s/rec/10.dat",SC_STORE_BASE_PATH);unlink(index);

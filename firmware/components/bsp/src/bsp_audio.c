@@ -10,10 +10,25 @@
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "esp_log.h"
+#include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 static const char *TAG = "bsp_audio";
+
+/* The callback runs in an ISR. An aligned word in internal DRAM is read or
+ * written in one instruction on the single-core ESP32-C3; the task only clears
+ * it before starting a new recording, never while capture is active. */
+static DRAM_ATTR volatile uint32_t s_rx_overflow;
+static bool IRAM_ATTR audio_rx_overflow(i2s_chan_handle_t channel,
+                                        i2s_event_data_t *event, void *context)
+{
+    (void)channel;(void)event;(void)context;
+    s_rx_overflow=1;
+    return false;
+}
+bool bsp_audio_rx_overflowed(void) { return s_rx_overflow!=0; }
+void bsp_audio_clear_rx_overflow(void) { s_rx_overflow=0; }
 
 static esp_codec_dev_handle_t s_dev;
 static i2s_chan_handle_t      s_tx, s_rx;
@@ -345,6 +360,9 @@ static esp_err_t i2s_full_duplex_init(void) {
     if ((e = i2s_channel_init_std_mode(s_rx, &std)) != ESP_OK) {
         ESP_LOGE(TAG, "i2s rx 初始化失败: %s", esp_err_to_name(e)); return e;
     }
+    i2s_event_callbacks_t callbacks={.on_recv_q_ovf=audio_rx_overflow};
+    e=i2s_channel_register_event_callback(s_rx,&callbacks,NULL);
+    if(e!=ESP_OK){ESP_LOGE(TAG,"I2S RX overflow callback failed: %s",esp_err_to_name(e));return e;}
     // esp_codec_dev_open 内部重配前会先 i2s_channel_disable,而 disable 要求通道处于
     // RUNNING;刚 init 的通道是 READY,会打一条 "channel has not been enabled yet" 错误日志。
     // 这里先 enable 一次让那次 disable 合法(此时 codec 未配,不出声)。

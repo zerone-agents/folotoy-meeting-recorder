@@ -1,4 +1,6 @@
 #include "meeting_network.h"
+#include "meeting_ca_compat.h"
+#include "meeting_wifi_slot_apply.h"
 #include "meeting_sta.h"
 #include "meeting_worker.h"
 #include "meeting_runtime.h"
@@ -52,6 +54,18 @@ static bool s_time_restore;
 static SemaphoreHandle_t s_clock_lock,s_lifecycle_lock;
 static atomic_bool s_enabled,s_stop_requested;
 static atomic_bool s_record_requested, s_record_ready;
+/* Once the supervisor drains STA, the management controller owns the radio
+ * until it releases the window, including during recording preemption. */
+/* Low bits are idle/pending/drained; upper bits identify each request. */
+enum { MANAGEMENT_IDLE=0, MANAGEMENT_PENDING=1, MANAGEMENT_DRAINED=2, MANAGEMENT_MASK=3 };
+static atomic_uint s_management_state;
+static bool management_requested(void){return (atomic_load(&s_management_state)&MANAGEMENT_MASK)!=MANAGEMENT_IDLE;}
+static void management_set_phase(unsigned phase)
+{
+    unsigned old=atomic_load(&s_management_state), next;
+    do { next=((old&~MANAGEMENT_MASK)+4u)|phase; }
+    while(!atomic_compare_exchange_weak(&s_management_state,&old,next));
+}
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
 static atomic_bool s_test_saved_recording;
 #endif
@@ -101,15 +115,40 @@ void meeting_network_record_request(void)
     if(meeting_network_enabled())notify_worker();
 }
 bool meeting_network_record_ready(void)
-{return !meeting_network_enabled()||(!atomic_load(&s_stop_requested)&&atomic_load(&s_record_ready));}
+{return !management_requested()&&(!meeting_network_enabled()||(!atomic_load(&s_stop_requested)&&atomic_load(&s_record_ready)));}
 void meeting_network_record_release(void)
 {
     atomic_store(&s_record_requested,false);
     atomic_store(&s_record_ready,false);
     if(meeting_network_enabled())notify_worker();
 }
+void meeting_network_management_request(void)
+{
+    atomic_store(&s_record_ready,false);
+    management_set_phase(MANAGEMENT_PENDING);
+    if(meeting_network_enabled())notify_worker();
+}
+bool meeting_network_management_ready(void)
+{unsigned state=atomic_load(&s_management_state);return (state&MANAGEMENT_MASK)!=MANAGEMENT_IDLE&&!atomic_load(&s_record_requested)&&
+    !meeting_sta_running()&&(!meeting_network_enabled()||(!atomic_load(&s_stop_requested)&&(state&MANAGEMENT_MASK)==MANAGEMENT_DRAINED));}
+void meeting_network_management_release(void)
+{
+    management_set_phase(MANAGEMENT_IDLE);
+    if(!atomic_load(&s_record_requested))atomic_store(&s_record_ready,false);
+    if(meeting_network_enabled())notify_worker();
+}
+bool meeting_network_apply_wifi_slot(const meeting_wifi_slots_io *slots,uint64_t generation,
+                                     const uint8_t request_id[16],const uint8_t digest[32])
+{
+    if(!meeting_network_enabled()||!meeting_network_management_ready()||!slots||!request_id||!digest)return false;
+    meeting_wifi_slot slot={0};unsigned index;
+    bool ok=meeting_wifi_slots_load(slots,&slot,&index)==MEETING_WIFI_SLOTS_OK&&slot.generation==generation&&
+        !memcmp(slot.request_id,request_id,16)&&!memcmp(slot.digest,digest,32)&&meeting_wifi_slot_apply(&s_config,&slot);
+    volatile unsigned char *p=(volatile unsigned char *)&slot;for(size_t i=0;i<sizeof(slot);i++)p[i]=0;
+    return ok;
+}
 static bool has_ip(void *ctx){(void)ctx;return meeting_sta_has_ip();}
-static bool cancelled(void *ctx){(void)ctx;return !meeting_network_enabled()||atomic_load(&s_stop_requested);}
+static bool cancelled(void *ctx){(void)ctx;return !meeting_network_enabled()||atomic_load(&s_stop_requested)||atomic_load(&s_record_requested)||management_requested();}
 static bool clock_cancelled(void *ctx){return cancelled(ctx)||atomic_load(&s_record_requested)||!meeting_sta_has_ip();}
 static bool time_valid(void *ctx)
 {
@@ -177,17 +216,27 @@ static void task(void *arg)
     int64_t test_deadline=0;
     char test_ssid[sizeof(s_config.ssid)],test_password[sizeof(s_config.password)];
 #endif
+    const char *preferred_ca=meeting_ca_compat_preferred(&s_config);
     const meeting_online_config config={.https={.origin=s_config.origin,.device_token=s_config.device_token,
-        .ca_pem=s_config.ca_pem,.is_cancelled=cancelled,.time_valid=time_valid},.has_ip=has_ip};
+        .ca_pem=preferred_ca,.fallback_ca_pem=preferred_ca==s_config.ca_pem?NULL:s_config.ca_pem,
+        .is_cancelled=cancelled,.time_valid=time_valid},.has_ip=has_ip};
     while(meeting_network_enabled()&&!atomic_load(&s_stop_requested)){
-        if(atomic_load(&s_record_requested)){
+        if(atomic_load(&s_record_requested)||management_requested()){
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
             if(!test_finished&&atomic_load(&s_test_saved_recording))test_armed=true;
 #endif
-            if(meeting_sta_running()&&meeting_sta_stop()!=ESP_OK){
+            unsigned management=atomic_load(&s_management_state);
+            if((management&MANAGEMENT_MASK)==MANAGEMENT_DRAINED){
+                /* The controller will stop its own trial before releasing. */
+                atomic_store(&s_record_ready,false);
+            }else if(meeting_sta_running()&&meeting_sta_stop()!=ESP_OK){
                 atomic_store(&s_record_ready,false);
             }else{
-                atomic_store(&s_record_ready,true);
+                if((management&MANAGEMENT_MASK)==MANAGEMENT_PENDING){
+                    unsigned expected=management;
+                    (void)atomic_compare_exchange_strong(&s_management_state,&expected,(management&~MANAGEMENT_MASK)|MANAGEMENT_DRAINED);
+                }
+                atomic_store(&s_record_ready,!management_requested());
             }
             (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(RETRY_MS));
             continue;
@@ -249,7 +298,7 @@ static void task(void *arg)
             }
         }
         else atomic_store(&s_state,MEETING_NETWORK_SYNCING);
-        if(atomic_load(&s_record_requested))continue;
+        if(atomic_load(&s_record_requested)||management_requested())continue;
         if(meeting_sta_has_ip()&&time_valid(NULL))atomic_store(&s_state,MEETING_NETWORK_SYNCING);
         meeting_worker_result result={0};
         sc_file_entry_t *entries=calloc(UPLOAD_LIST_BATCH,sizeof(*entries));
@@ -269,6 +318,13 @@ static void task(void *arg)
         (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(result.paused?5000:meeting_sta_has_ip()?60000:RETRY_MS));
     }
     if(atomic_load(&s_stop_requested)){
+        /* A management trial may still own STA. Its controller must finish
+         * or preempt the trial and release the window before shutdown can
+         * touch the same driver or erase the active configuration. */
+        while(management_requested()){
+            ESP_LOGW(TAG,"Waiting for management radio release before shutdown");
+            (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(1000));
+        }
         while(meeting_sta_running()&&meeting_sta_stop()!=ESP_OK){
             ESP_LOGW(TAG,"Wi-Fi shutdown failed; retaining configuration until retry");
             vTaskDelay(pdMS_TO_TICKS(1000));
