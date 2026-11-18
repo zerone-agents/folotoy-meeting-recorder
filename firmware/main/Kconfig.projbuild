@@ -26,6 +26,26 @@ config MEETING_AGENT_TIME_PROVISION
         administrator over HTTPS before selecting the exact public key.
         Restrict the build to the supervised device MAC. Does not protect
         against an attacker able to flash this device.
+config MEETING_AGENT_MGMT_PROVISION
+    bool "One-device management identity maintenance build"
+    default n
+    help
+        Temporary USB maintenance build for the supervised MAC only.
+        The generated application contains a secret and must be handled as
+        a private artifact and replaced after provisioning.
+config MEETING_AGENT_MGMT_SECRET
+    string "Management credential (64 hex digits; private build only)"
+    default ""
+    depends on MEETING_AGENT_MGMT_PROVISION
+config MEETING_AGENT_MGMT_ACTION
+    string "Identity action: install, rotate, or revoke"
+    default "install"
+    depends on MEETING_AGENT_MGMT_PROVISION
+config MEETING_AGENT_MGMT_EXPECTED_GENERATION
+    int "Expected current identity generation for rotate or revoke"
+    default 1
+    range 1 2147483646
+    depends on MEETING_AGENT_MGMT_PROVISION
 config MEETING_AGENT_TIME_ORIGIN_SHA256
     string "Expected configured origin SHA-256"
     default ""
@@ -122,11 +142,77 @@ config MEETING_SUPERVISED_TEST_AFTER_SYNC_SECONDS
     range 1 1800
     default 10
     depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+config MEETING_SUPERVISED_TEST_RECORD_IN_BLE_WINDOW
+    bool "Start supervised short recording during management BLE window"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+    help
+        Test only: wait for the real idle management BLE window before
+        requesting capture on the supervised device.
+config MEETING_SUPERVISED_TEST_RECORD_IN_BLE_CONNECTED
+    bool "Start supervised recording during an active BLE connection"
+    default n
+    depends on MEETING_SUPERVISED_TEST_RECORD_IN_BLE_WINDOW
+    help
+        Test only: wait until the management transport has a connection
+        before requesting capture on the supervised device.
+config MEETING_SUPERVISED_TEST_RECORD_AFTER_BLE_AUTH
+    bool "Start supervised recording after BLE authentication"
+    default n
+    depends on MEETING_SUPERVISED_TEST_RECORD_IN_BLE_CONNECTED
+    help
+        Test only: wait for an authenticated management request before
+        exercising recording priority on the supervised device.
+config MEETING_SUPERVISED_TEST_RECORD_IN_WIFI_TRIAL
+    bool "Start supervised recording during candidate Wi-Fi trial"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC && !MEETING_SUPERVISED_TEST_RECORD_IN_BLE_WINDOW
+    help
+        Test only: request capture while the candidate network test owns STA.
+config MEETING_SUPERVISED_TEST_LONG_WIFI_TRIAL
+    bool "Extend supervised Wi-Fi trial for physical power-loss testing"
+    default n
+    help
+        Test only. On the configured supervised device, extend an unconnected
+        candidate trial to three minutes so a person can remove power in the
+        testing state. Never enable in production firmware.
+config MEETING_SUPERVISED_TEST_COMMIT_HOLD
+    int "Hold a Wi-Fi commit checkpoint for physical power-loss testing"
+    range 0 2
+    default 0
+    help
+        Test only. On the configured supervised device, 1 pauses after the
+        committing state is durable but before the slot pointer is changed;
+        2 pauses after the pointer is changed. Never enable in production.
 config MEETING_SUPERVISED_TEST_AFTER_SYNC_RUN
     int "One-shot identifier for a 30-minute recording after time sync"
     range 1 9999
     default 1
     depends on MEETING_SUPERVISED_TEST_AFTER_SYNC
+config MEETING_SUPERVISED_TEST_DISABLE_MGMT_WINDOWS
+    bool "Disable management windows for supervised upload baseline"
+    default n
+    depends on MEETING_SUPERVISED_TEST_AFTER_SYNC || MEETING_SUPERVISED_TEST_REPLAY_UPLOAD
+    help
+        Test only: suppress management windows on the supervised device so
+        a previously saved recording can establish an upload baseline.
+config MEETING_SUPERVISED_TEST_REPLAY_UPLOAD
+    bool "Replay one retained recording for supervised upload benchmarks"
+    default n
+    help
+        Test only. On the supervised device, upload the specified sealed
+        30-minute recording under a test-only identity without confirming or
+        deleting the original. Never enable in production firmware.
+config MEETING_SUPERVISED_TEST_REPLAY_FILE
+    int "Reserved local recording ID for replay"
+    range 1 2147483647
+    default 1
+    depends on MEETING_SUPERVISED_TEST_REPLAY_UPLOAD
+config MEETING_SUPERVISED_TEST_REPLAY_RUN
+    int "Distinct benchmark run identifier"
+    range 1 9999
+    default 1
+    depends on MEETING_SUPERVISED_TEST_REPLAY_UPLOAD
 config MEETING_SUPERVISED_TEST_OFFLINE_SECONDS
     int "Simulate unavailable Wi-Fi after supervised recording"
     range 0 3600

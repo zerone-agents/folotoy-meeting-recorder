@@ -2,6 +2,7 @@
 #include "meeting_runtime.h"
 #include "sc_store.h"
 #include "esp_log.h"
+#include "meeting_upload_activity.h"
 
 static const char *TAG="meeting_worker";
 
@@ -27,7 +28,16 @@ meeting_worker_result meeting_worker_pass(const meeting_online_config *config,sc
             ESP_LOGW(TAG,"file %lu: recording metadata unavailable; retained for maintenance",(unsigned long)id);
             result.attempted++;result.failed++;continue;
         }
-        meeting_upload_result status=meeting_runtime_upload(id,has_time,recorded_at,trust,config);
+        meeting_online_config observed=*config;
+        uint64_t generation=meeting_upload_activity_begin();
+        observed.https.activity_generation=generation;
+        meeting_upload_result status=meeting_runtime_upload(id,has_time,recorded_at,trust,&observed);
+        meeting_upload_activity_finish(generation,status==MEETING_UPLOAD_CONFIRMED?MEETING_ACTIVITY_CONFIRMED:
+            status==MEETING_UPLOAD_PAUSED?MEETING_ACTIVITY_PAUSED:MEETING_ACTIVITY_FAILED);
+        /* CONFIRMED from runtime means receipt verification, durable cleanup
+         * intent and file removal succeeded. The reserved file identity cannot
+         * legitimately reappear. Reclaim its volatile progress watermark. */
+        if(status==MEETING_UPLOAD_CONFIRMED)(void)meeting_upload_activity_retire(generation);
         result.attempted++;
         if(status==MEETING_UPLOAD_PAUSED){result.paused=true;break;}
         if(status==MEETING_UPLOAD_CONFIRMED)result.confirmed++;else result.failed++;

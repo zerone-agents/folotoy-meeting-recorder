@@ -365,12 +365,27 @@ done:
     return result;
 }
 
+/* A recovery error must never make a retired recording uploadable again.
+ * Caller holds the store mutex; absence is the only permissive result. */
+static bool retirement_allows_upload(uint32_t file_id)
+{
+    nvs_handle_t handle;
+    esp_err_t opened=nvs_open("meeting_done",NVS_READONLY,&handle);
+    if(opened==ESP_ERR_NVS_NOT_FOUND)return true;
+    if(opened!=ESP_OK)return false;
+    meeting_retired marker;
+    int status=meeting_retirement_nvs_read(handle,file_id,&marker);
+    nvs_close(handle);
+    return status==1;
+}
+
 FILE *sc_store_upload_acquire(uint32_t file_id)
 {
     if (!s_mounted || !s_mutex || !file_id) return NULL;
     lock();
     FILE *file = NULL;
-    if (!s_live.f && !s_upload_file && !s_cleanup_id && meeting_deletion_store_upload_permitted(file_id)) {
+    if (!s_live.f && !s_upload_file && !s_cleanup_id &&
+        retirement_allows_upload(file_id) && meeting_deletion_store_upload_permitted(file_id)) {
         char path[48]; uint8_t header[HDR_SIZE];
         path_dat(path, sizeof(path), file_id);
         if (hdr_read(path, header) && sc_rd32(header + 8) == file_id) {
@@ -941,30 +956,42 @@ esp_err_t sc_store_end(uint32_t end_time, uint8_t end_intent)
     uint32_t frames = s_live.frames;
     uint32_t bytes = s_live.pos;
     meeting_record record = {0};
+    const char *failed_stage = frames > 0 ? "sync" : "empty";
     bool ok = frames > 0 && live_sync();
     nvs_handle_t record_nvs;
     if (ok) {
+        failed_stage = "end_intent_open";
         if (nvs_open("meeting_rec", NVS_READWRITE, &record_nvs) != ESP_OK) ok=false;
-        else { ok=meeting_record_nvs_end_intent(record_nvs,id,end_intent) &&
-                  meeting_record_nvs_read(record_nvs,id,&record)==MEETING_RECORD_OK; nvs_close(record_nvs); }
+        else {
+            failed_stage = "end_intent_write";
+            ok=meeting_record_nvs_end_intent(record_nvs,id,end_intent);
+            if(ok){failed_stage = "end_intent_read";ok=meeting_record_nvs_read(record_nvs,id,&record)==MEETING_RECORD_OK;}
+            nvs_close(record_nvs);
+        }
     }
     /* Rewriting the head of a multi-megabyte LittleFS file can require a
      * second copy. Keep the open header and publish an independent seal only
      * after the durable file and index are closed successfully. */
-    if (fclose(s_live.f) != 0) ok = false;
-    if (s_live.idx && fclose(s_live.idx) != 0) ok = false;
+    if (fclose(s_live.f) != 0) { if(ok) failed_stage = "audio_close"; ok = false; }
+    if (s_live.idx && fclose(s_live.idx) != 0) { if(ok) failed_stage = "index_close"; ok = false; }
     memset(&s_live, 0, sizeof(s_live));
     if(ok){
         char path[48];struct stat st;path_dat(path,sizeof(path),id);
+        failed_stage = "file_size";
         ok=stat(path,&st)==0&&st.st_size>=0&&(uint64_t)st.st_size==bytes;
-        if(ok&&nvs_open("meeting_rec",NVS_READWRITE,&record_nvs)==ESP_OK){
-            meeting_seal seal={.file_id=id,.frames=frames,.bytes=bytes,.reason=(uint8_t)(end_intent-1)};
-            memcpy(seal.meeting_id,record.meeting_id,16);ok=meeting_seal_nvs_commit(record_nvs,&seal);nvs_close(record_nvs);
-        }else ok=false;
+        if(ok){
+            failed_stage = "seal_open";
+            if(nvs_open("meeting_rec",NVS_READWRITE,&record_nvs)==ESP_OK){
+                meeting_seal seal={.file_id=id,.frames=frames,.bytes=bytes,.reason=(uint8_t)(end_intent-1)};
+                memcpy(seal.meeting_id,record.meeting_id,16);
+                failed_stage = "seal_write";ok=meeting_seal_nvs_commit(record_nvs,&seal);nvs_close(record_nvs);
+            }else ok=false;
+        }
     }
     if (!ok) {
         s_ready = false;
-        ESP_LOGE(TAG, "录音保存失败，保留文件并停止存储操作");
+        (void)failed_stage; /* Some host-test logging stubs discard arguments. */
+        ESP_LOGE(TAG, "录音保存失败 stage=%s，保留文件并停止存储操作", failed_stage);
         unlock();
         return ESP_FAIL;
     }

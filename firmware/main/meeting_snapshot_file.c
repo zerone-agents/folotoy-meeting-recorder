@@ -39,16 +39,27 @@ bool meeting_snapshot_matches_file(FILE *file, const meeting_snapshot *snapshot)
 {
     return meeting_snapshot_matches_file_cancel(file,snapshot,NULL,NULL);
 }
+static bool hash_observed(void *ctx,const uint8_t *data,size_t length)
+{
+    return mbedtls_sha256_update(ctx,data,length)==0;
+}
 bool meeting_snapshot_matches_file_cancel(FILE *file, const meeting_snapshot *snapshot, meeting_cancel_fn cancelled, void *ctx)
 {
     if (!file || !snapshot) return false;
-    meeting_scr1_scan_result scan; uint8_t digest[32];
-    if (!meeting_scr1_scan_file_cancel(file, &scan,cancelled,ctx) || scan.valid_end != snapshot->valid_end || scan.frames != snapshot->frames ||
-        !meeting_snapshot_source_hash_cancel(file, digest,cancelled,ctx)) return false;
+    struct stat before,after;
+    if(fstat(fileno(file),&before)!=0||before.st_size<0)return false;
+    meeting_scr1_scan_result scan; uint8_t digest[32]={0};
+    mbedtls_sha256_context hash;mbedtls_sha256_init(&hash);
+    bool ok=mbedtls_sha256_starts(&hash,0)==0&&
+        meeting_scr1_scan_file_observe(file,&scan,cancelled,ctx,hash_observed,&hash)&&
+        scan.valid_end==snapshot->valid_end&&scan.frames==snapshot->frames&&
+        !(cancelled&&cancelled(ctx))&&mbedtls_sha256_finish(&hash,digest)==0;
+    mbedtls_sha256_free(&hash);
+    if(fstat(fileno(file),&after)!=0||before.st_size!=after.st_size||before.st_mtime!=after.st_mtime)ok=false;
     unsigned diff = 0;
     for (size_t i = 0; i < sizeof(digest); ++i) diff |= digest[i] ^ snapshot->source_sha256[i];
     memset(digest, 0, sizeof(digest));
-    return diff == 0;
+    return ok && diff == 0;
 }
 
 bool meeting_projection_digest(FILE *file, const meeting_scr1_scan_result *scan,

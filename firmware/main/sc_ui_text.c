@@ -13,7 +13,7 @@ static const text_pair messages[]={
  {"Start cancelled","已取消录音"},{"Delete unavailable","暂时无法删除"},
  {"Stop recording first","请先停止录音"},{"Bad Wi-Fi config","网络配置错误"},
  {"Press OK to pair","按 OK 配对"},{"Unbound","已解除绑定"},
- {"Setup unavailable","暂时无法配置"},{"Bluetooth stop failed","蓝牙停止失败"},
+ {"Setup unavailable","暂时无法配置"},{"Bluetooth stop failed","蓝牙停止失败"},{"Bluetooth busy","蓝牙忙，录音失败"},
  {"Audio busy","录音设备正忙"},{"Setup failed","配置失败"},
  {"Setup stop failed","停止配置失败"},{"Recording","正在录音"},
  {"Review before OK","请先核对信息"},{"Clock not trusted - setup failed","时间未确认，配置失败"},

@@ -1,7 +1,8 @@
 #include "../../main/meeting_restore.c"
 #include <assert.h>
 #include <string.h>
-static int missing_anchor,missing_floor,bad_anchor,starts,closed;
+static int missing_anchor,missing_floor,bad_anchor,starts,closed,wifi_boot_error,wifi_boot_calls;
+bool meeting_wifi_boot_restore(meeting_config *config){assert(config);wifi_boot_calls++;return !wifi_boot_error;}
 #if CONFIG_MEETING_AGENT_TIME_PROVISION
 static int installs,agent_allowed=1;
 bool meeting_commission_allowed(void){return agent_allowed;}
@@ -42,6 +43,8 @@ int main(void){missing_anchor=1;assert(meeting_restore_start()!=ESP_OK&&starts==
  agent_allowed=1;assert(meeting_restore_start()!=ESP_OK&&installs==2&&starts==0&&!clock_open);
 #endif
 #else
- bad_anchor=1;assert(meeting_restore_start()!=ESP_OK&&starts==0&&!clock_open);bad_anchor=0;assert(meeting_restore_start()==ESP_OK&&starts==1&&clock_open);assert(meeting_restore_start()==ESP_ERR_INVALID_STATE);
+ bad_anchor=1;assert(meeting_restore_start()!=ESP_OK&&starts==0&&!clock_open);bad_anchor=0;
+ wifi_boot_error=1;assert(meeting_restore_start()!=ESP_OK&&starts==0&&!clock_open&&wifi_boot_calls>0);
+ wifi_boot_error=0;assert(meeting_restore_start()==ESP_OK&&starts==1&&clock_open);assert(meeting_restore_start()==ESP_ERR_INVALID_STATE);
 #endif
  assert(closed>=7);return 0;}

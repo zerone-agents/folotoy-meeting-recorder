@@ -30,6 +30,94 @@ run_static_checks() {
 
     test_dir="$(mktemp -d /tmp/ai-passport-host-tests.XXXXXX)"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_stack_lease.c main/meeting_stack_lease.c -o "${test_dir}/test_stack_lease"
+    "${test_dir}/test_stack_lease"
+    cc -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_idle_coordinator.c main/meeting_idle_coordinator.c -o "${test_dir}/test_idle_coordinator"
+    "${test_dir}/test_idle_coordinator"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_idle_window.c main/meeting_idle_window.c -o "${test_dir}/test_idle_window"
+    "${test_dir}/test_idle_window"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_wifi_switch.c main/meeting_wifi_switch.c -o "${test_dir}/test_wifi_switch"
+    "${test_dir}/test_wifi_switch"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_wifi_switch_nvs.c main/meeting_wifi_switch.c main/meeting_wifi_switch_nvs.c -o "${test_dir}/test_wifi_switch_nvs"
+    "${test_dir}/test_wifi_switch_nvs"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_wifi_slots.c main/meeting_wifi_slots.c main/meeting_wifi_slot_proof.c main/meeting_wifi_switch.c -o "${test_dir}/test_wifi_slots"
+    "${test_dir}/test_wifi_slots"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_wifi_slots_nvs.c main/meeting_wifi_slots.c main/meeting_wifi_slots_nvs.c -o "${test_dir}/test_wifi_slots_nvs"
+    "${test_dir}/test_wifi_slots_nvs"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_wifi_slot_apply.c main/meeting_wifi_slot_apply.c main/meeting_wifi_slots.c -o "${test_dir}/test_wifi_slot_apply"
+    "${test_dir}/test_wifi_slot_apply"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_wifi_trial.c main/meeting_wifi_trial.c -o "${test_dir}/test_wifi_trial"
+    "${test_dir}/test_wifi_trial"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_wifi_trial_sta.c main/meeting_wifi_trial.c main/meeting_wifi_trial_sta.c -o "${test_dir}/test_wifi_trial_sta"
+    "${test_dir}/test_wifi_trial_sta"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_wifi_operation.c main/meeting_wifi_operation.c main/meeting_wifi_trial.c main/meeting_wifi_slots.c \
+        main/meeting_wifi_slot_proof.c main/meeting_wifi_switch.c main/meeting_management_dispatch.c main/meeting_management_ack.c main/meeting_wifi_command.c main/meeting_wifi_status.c -o "${test_dir}/test_wifi_operation"
+    "${test_dir}/test_wifi_operation"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DCONFIG_MEETING_SUPERVISED_TEST_LONG_WIFI_TRIAL=1 -Itests/meeting/stubs -Imain \
+        tests/meeting/test_wifi_operation.c main/meeting_wifi_operation.c main/meeting_wifi_trial.c main/meeting_wifi_slots.c \
+        main/meeting_wifi_slot_proof.c main/meeting_wifi_switch.c main/meeting_management_dispatch.c main/meeting_management_ack.c main/meeting_wifi_command.c main/meeting_wifi_status.c -o "${test_dir}/test_wifi_operation_power_test"
+    "${test_dir}/test_wifi_operation_power_test"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_wifi_command.c main/meeting_wifi_command.c -o "${test_dir}/test_wifi_command"
+    "${test_dir}/test_wifi_command"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_wifi_status.c main/meeting_wifi_status.c -o "${test_dir}/test_wifi_status"
+    "${test_dir}/test_wifi_status"
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_wifi_command_agent.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_wifi_agent_transport.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_wifi_agent_task.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_wifi_agent_store.py
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_wifi_agent_client.py
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_agent_mgmt.c main/meeting_agent_mgmt.c main/meeting_management_credential.c -o "${test_dir}/test_agent_mgmt"
+    "${test_dir}/test_agent_mgmt"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_record_preempt_async.c main/meeting_record_preempt_async.c -o "${test_dir}/test_record_preempt_async"
+    "${test_dir}/test_record_preempt_async"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_session.c main/meeting_management_session.c -o "${test_dir}/test_management_session"
+    "${test_dir}/test_management_session"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_controller.c main/meeting_management_controller.c main/meeting_upload_priority.c main/meeting_upload_activity.c -o "${test_dir}/test_management_controller"
+    "${test_dir}/test_management_controller"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_inbox.c main/meeting_management_inbox.c main/meeting_wifi_command.c -o "${test_dir}/test_management_inbox"
+    "${test_dir}/test_management_inbox"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_query.c main/meeting_management_query.c main/meeting_wifi_switch.c main/meeting_wifi_status.c -o "${test_dir}/test_management_query"
+    "${test_dir}/test_management_query"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_dispatch.c main/meeting_management_dispatch.c main/meeting_wifi_command.c main/meeting_wifi_status.c -o "${test_dir}/test_management_dispatch"
+    "${test_dir}/test_management_dispatch"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pthread -Imain \
+        tests/meeting/test_stack_lease_threads.c main/meeting_stack_lease.c -o "${test_dir}/test_stack_lease_threads"
+    "${test_dir}/test_stack_lease_threads"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_management_gate.c main/meeting_management_gate.c main/meeting_management_credential.c main/meeting_pairing_session.c -o "${test_dir}/test_management_gate"
+    "${test_dir}/test_management_gate"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_management_password.c main/meeting_management_password.c -o "${test_dir}/test_management_password"
+    "${test_dir}/test_management_password"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_ble.c main/meeting_management_ble.c main/meeting_management_credential.c -o "${test_dir}/test_management_ble"
+    "${test_dir}/test_management_ble"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_management_credential.c main/meeting_management_credential.c -o "${test_dir}/test_management_credential"
+    "${test_dir}/test_management_credential"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_management_credential_nvs.c main/meeting_management_credential.c main/meeting_management_credential_nvs.c -o "${test_dir}/test_management_credential_nvs"
+    "${test_dir}/test_management_credential_nvs"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/meeting/test_credential_reset.c main/meeting_credential_reset.c -o "${test_dir}/test_credential_reset"
     "${test_dir}/test_credential_reset"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
@@ -62,6 +150,9 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/meeting/test_snapshot.c main/meeting_snapshot.c -o "${test_dir}/test_meeting_snapshot"
     "${test_dir}/test_meeting_snapshot"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_snapshot_forward_compat.c main/meeting_snapshot.c -o "${test_dir}/test_snapshot_forward_compat"
+    "${test_dir}/test_snapshot_forward_compat"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/meeting/test_record.c main/meeting_record.c -o "${test_dir}/test_meeting_record"
     "${test_dir}/test_meeting_record"
@@ -190,17 +281,34 @@ run_static_checks() {
         main/meeting_record.c main/meeting_record_nvs.c main/meeting_snapshot.c main/meeting_snapshot_nvs.c \
         main/meeting_recovery.c main/meeting_seal.c main/meeting_seal_nvs.c main/meeting_deletion.c main/meeting_deletion_nvs.c main/meeting_deletion_store.c main/meeting_delete_proof.c main/meeting_delete_proof_nvs.c main/meeting_snapshot_file.c main/meeting_scr1.c main/meeting_scr1_file.c \
         main/meeting_receipt.c main/meeting_confirmation.c main/meeting_confirmation_nvs.c \
-        main/meeting_cleanup.c main/meeting_retirement.c main/meeting_retirement_nvs.c main/meeting_upload.c \
+        main/meeting_cleanup.c main/meeting_retirement.c main/meeting_retirement_nvs.c main/meeting_upload.c main/meeting_store_upload.c \
         "${test_dir}/meeting_cleanup_files.o" "${gc_sections}" \
         -o "${test_dir}/test_meeting_store_cleanup_integration"
     "${test_dir}/test_meeting_store_cleanup_integration"
     rmdir "${store_test_parent}"
     bash tests/meeting/test_lfs_export.sh
     PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_device_export.py
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_upload_priority.c main/meeting_upload_priority.c -o "${test_dir}/test_meeting_upload_priority"
+    "${test_dir}/test_meeting_upload_priority"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -pthread -Imain \
+        tests/meeting/test_upload_activity.c main/meeting_upload_activity.c \
+        -o "${test_dir}/test_meeting_upload_activity"
+    "${test_dir}/test_meeting_upload_activity"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
         tests/meeting/test_upload_protocol.c main/meeting_receipt.c main/meeting_upload_protocol.c \
         -o "${test_dir}/test_meeting_upload_protocol"
     "${test_dir}/test_meeting_upload_protocol"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_window_resume.c main/meeting_receipt.c main/meeting_upload_protocol.c \
+        -o "${test_dir}/test_window_resume"
+    "${test_dir}/test_window_resume"
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_security2_rng_cleanup.py main/meeting_security2_idf553.c
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_srp_short_salt.py main/meeting_srp_idf553.c
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_srp_padding.py main/meeting_srp_idf553.c
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_srp_session_faults.py main/meeting_srp_idf553.c
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_srp_pubkey_faults.py main/meeting_srp_idf553.c
+    PYTHONDONTWRITEBYTECODE=1 python3 tests/meeting/test_srp_mpi_cleanup.py main/meeting_srp_mpi_idf553.c
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
         tests/meeting/test_legacy_resume.c main/meeting_receipt.c main/meeting_upload_protocol.c \
         -o "${test_dir}/test_legacy_resume"
@@ -228,6 +336,15 @@ run_static_checks() {
             main/meeting_upload_protocol.c "${IDF_PATH}/components/json/cJSON/cJSON.c" -lm \
             -o "${test_dir}/test_meeting_upload_e2e"
         "${test_dir}/test_meeting_upload_e2e"
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain -I"${IDF_PATH}/components/json/cJSON" \
+            tests/meeting/test_window_resume_json.c main/meeting_receipt.c main/meeting_receipt_json.c \
+            main/meeting_upload_protocol.c "${IDF_PATH}/components/json/cJSON/cJSON.c" -lm \
+            -o "${test_dir}/test_window_resume_json"
+        "${test_dir}/test_window_resume_json"
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain -I"${IDF_PATH}/components/json/cJSON" \
+            tests/meeting/test_window_low_memory.c main/meeting_receipt.c main/meeting_receipt_json.c \
+            "${IDF_PATH}/components/json/cJSON/cJSON.c" -lm -o "${test_dir}/test_window_low_memory"
+        "${test_dir}/test_window_low_memory"
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain -I"${IDF_PATH}/components/json/cJSON" \
             tests/meeting/test_config.c tests/meeting/config_sha256_stub.c main/meeting_config.c "${IDF_PATH}/components/json/cJSON/cJSON.c" -lm \
             -o "${test_dir}/test_meeting_config"
@@ -269,7 +386,7 @@ run_static_checks() {
         tests/meeting/test_sta.c main/meeting_sta.c -o "${test_dir}/test_meeting_sta"
     "${test_dir}/test_meeting_sta"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
-        tests/meeting/test_upload_session.c main/meeting_upload_session.c -o "${test_dir}/test_meeting_upload_session"
+        tests/meeting/test_upload_session.c main/meeting_upload_session.c main/meeting_upload_activity.c -o "${test_dir}/test_meeting_upload_session"
     "${test_dir}/test_meeting_upload_session"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/meeting/test_online_session.c main/meeting_online_session.c -o "${test_dir}/test_meeting_online_session"
@@ -277,6 +394,11 @@ run_static_checks() {
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
         tests/meeting/test_store_upload.c main/meeting_store_upload.c -o "${test_dir}/test_meeting_store_upload"
     "${test_dir}/test_meeting_store_upload"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -DCONFIG_MEETING_SUPERVISED_TEST_REPLAY_UPLOAD=1 \
+        -DCONFIG_MEETING_SUPERVISED_TEST_REPLAY_FILE=7 -DCONFIG_MEETING_SUPERVISED_TEST_REPLAY_RUN=1 \
+        -Itests/meeting/stubs -Imain tests/meeting/test_replay_upload.c main/meeting_store_upload.c \
+        -o "${test_dir}/test_meeting_replay_upload"
+    "${test_dir}/test_meeting_replay_upload"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/meeting/test_arbitration.c main/meeting_arbitration.c -o "${test_dir}/test_meeting_arbitration"
     "${test_dir}/test_meeting_arbitration"
@@ -287,11 +409,17 @@ run_static_checks() {
         tests/meeting/test_runtime.c main/meeting_runtime.c main/meeting_arbitration.c -o "${test_dir}/test_meeting_runtime"
     "${test_dir}/test_meeting_runtime"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
-        tests/meeting/test_worker.c main/meeting_worker.c -o "${test_dir}/test_meeting_worker"
+        tests/meeting/test_worker.c main/meeting_worker.c main/meeting_upload_activity.c -o "${test_dir}/test_meeting_worker"
     "${test_dir}/test_meeting_worker"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+        tests/meeting/test_ca_compat.c main/meeting_ca_compat.c -o "${test_dir}/test_ca_compat"
+    "${test_dir}/test_ca_compat"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
-        tests/meeting/test_network.c main/meeting_clock.c -o "${test_dir}/test_meeting_network"
+        tests/meeting/test_network.c main/meeting_clock.c main/meeting_wifi_slot_apply.c main/meeting_wifi_slots.c main/meeting_ca_compat.c -o "${test_dir}/test_meeting_network"
     "${test_dir}/test_meeting_network"
+    "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
+        tests/meeting/test_wifi_boot.c main/meeting_wifi_boot.c main/meeting_wifi_switch.c main/meeting_wifi_slots.c main/meeting_wifi_slot_apply.c -o "${test_dir}/test_meeting_wifi_boot"
+    "${test_dir}/test_meeting_wifi_boot"
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Itests/meeting/stubs -Imain \
         tests/meeting/test_restore.c -o "${test_dir}/test_meeting_restore"
     "${test_dir}/test_meeting_restore"

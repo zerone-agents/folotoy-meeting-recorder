@@ -145,13 +145,17 @@ static esp_err_t handle_session_command0(session_t *cur_session,
                 cur_session->salt_len, cur_session->verifier, cur_session->verifier_len) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to set salt and verifier!");
             esp_srp_free(cur_session->srp_hd);
-        cur_session->srp_hd = NULL;
+            cur_session->srp_hd = NULL;
+            cur_session->session_key = NULL;
+            cur_session->session_key_len = 0;
             return ESP_FAIL;
         }
         if (esp_srp_srv_pubkey_from_salt_verifier(cur_session->srp_hd, &device_pubkey, &device_pubkey_len) != ESP_OK) {
             ESP_LOGE(TAG, "Failed to device public key!");
             esp_srp_free(cur_session->srp_hd);
-        cur_session->srp_hd = NULL;
+            cur_session->srp_hd = NULL;
+            cur_session->session_key = NULL;
+            cur_session->session_key_len = 0;
             return ESP_FAIL;
         }
     }
@@ -162,6 +166,8 @@ static esp_err_t handle_session_command0(session_t *cur_session,
         ESP_LOGE(TAG, "Failed to generate device session key!");
         esp_srp_free(cur_session->srp_hd);
         cur_session->srp_hd = NULL;
+        cur_session->session_key = NULL;
+        cur_session->session_key_len = 0;
         return ESP_FAIL;
     }
     hexdump("Session Key", cur_session->session_key, cur_session->session_key_len);
@@ -172,6 +178,8 @@ static esp_err_t handle_session_command0(session_t *cur_session,
         ESP_LOGE(TAG, "Error allocating memory for response0");
         esp_srp_free(cur_session->srp_hd);
         cur_session->srp_hd = NULL;
+        cur_session->session_key = NULL;
+        cur_session->session_key_len = 0;
         free(out);
         free(out_resp);
         return ESP_ERR_NO_MEM;
@@ -198,6 +206,8 @@ static esp_err_t handle_session_command0(session_t *cur_session,
         ESP_LOGE(TAG, "Failed to allocate memory!");
         esp_srp_free(cur_session->srp_hd);
         cur_session->srp_hd = NULL;
+        cur_session->session_key = NULL;
+        cur_session->session_key_len = 0;
         free(out);
         free(out_resp);
         return ESP_ERR_NO_MEM;
@@ -212,6 +222,26 @@ static esp_err_t handle_session_command0(session_t *cur_session,
 
     ESP_LOGD(TAG, "Session setup phase1 done");
     return ESP_OK;
+}
+
+/* The IDF 5.5.3 implementation leaves both local RNG contexts alive after
+ * returning, leaking the dynamically allocated entropy accumulator. */
+static bool sec2_random_session_id(unsigned char *out, size_t length)
+{
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context ctr_drbg;
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&ctr_drbg);
+    int ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0);
+    if (ret != 0) {
+        ESP_LOGE(TAG, "Failed to seed random number generator");
+    } else {
+        ret = mbedtls_ctr_drbg_random(&ctr_drbg, out, length);
+        if (ret != 0) ESP_LOGE(TAG, "Failed to generate random number");
+    }
+    mbedtls_ctr_drbg_free(&ctr_drbg);
+    mbedtls_entropy_free(&entropy);
+    return ret == 0;
 }
 
 static esp_err_t handle_session_command1(session_t *cur_session,
@@ -247,24 +277,8 @@ static esp_err_t handle_session_command1(session_t *cur_session,
     }
     hexdump("Device proof", device_proof, CLIENT_PROOF_LEN);
 
-    mbedtls_entropy_context entropy;
-    mbedtls_ctr_drbg_context ctr_drbg;
-
-    mbedtls_entropy_init(&entropy);
-    mbedtls_ctr_drbg_init(&ctr_drbg);
-
-    int ret;
-    ret = mbedtls_ctr_drbg_seed(&ctr_drbg, mbedtls_entropy_func, &entropy, NULL, 0);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to seed random number generator");
-        free(device_proof);
-        return ESP_FAIL;
-    }
-
     aes_gcm_iv_t *iv = (aes_gcm_iv_t *) cur_session->iv;
-    ret = mbedtls_ctr_drbg_random(&ctr_drbg, iv->session_id, SESSION_ID_LEN);
-    if (ret != 0) {
-        ESP_LOGE(TAG, "Failed to generate random number");
+    if (!sec2_random_session_id(iv->session_id, SESSION_ID_LEN)) {
         free(device_proof);
         return ESP_FAIL;
     }
@@ -421,7 +435,10 @@ static esp_err_t sec2_new_session(protocomm_security_handle_t handle, uint32_t s
     if (cur_session->id != -1) {
         /* Only one session is allowed at a time */
         ESP_LOGE(TAG, "Closing old session with id %" PRIu32, cur_session->id);
-        sec2_close_session(cur_session, session_id);
+        esp_err_t err = sec2_close_session(cur_session, cur_session->id);
+        if (err != ESP_OK) {
+            return err;
+        }
     }
 
     cur_session->id = session_id;

@@ -16,3 +16,12 @@ typedef struct {
 typedef enum { MEETING_UPLOAD_CONFIRMED, MEETING_UPLOAD_PAUSED, MEETING_UPLOAD_FAILED } meeting_upload_result;
 meeting_upload_result meeting_upload_run(FILE *source,const meeting_snapshot *snapshot,
                                           const meeting_manifest *manifest,const meeting_upload_transport *transport);
+/* Only for a caller that just built this manifest from source under the same
+ * uninterrupted exclusive source lock. No cached or caller-supplied manifest
+ * may use this entry point. The receipt does not authorize local deletion. */
+meeting_upload_result meeting_upload_run_prevalidated(FILE *source,const meeting_snapshot *snapshot,
+                                          const meeting_manifest *manifest,const meeting_upload_transport *transport);
+typedef void (*meeting_upload_progress_fn)(void *ctx,uint32_t confirmed_next);
+meeting_upload_result meeting_upload_run_observed(FILE *source,const meeting_snapshot *snapshot,
+    const meeting_manifest *manifest,const meeting_upload_transport *transport,
+    meeting_upload_progress_fn progress,void *progress_ctx);

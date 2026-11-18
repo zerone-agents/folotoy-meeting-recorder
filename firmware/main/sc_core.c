@@ -17,6 +17,9 @@
 #include "sc_xfer.h"
 #include "meeting_runtime.h"
 #include "meeting_network.h"
+#include "meeting_idle_coordinator.h"
+#include "meeting_record_preempt_async.h"
+#include "meeting_management_controller.h"
 #if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
 #include "meeting_https.h"
 #endif
@@ -33,11 +36,13 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <sys/time.h>
 #include <time.h>
 
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -65,7 +70,7 @@ static const char *TAG = "sc_core";
 // 不能卡住 I2S 采集。4 KB 约可缓冲 1.5 秒(16 kbps)。
 #define FRAME_BUF_BYTES     4096
 #define BIND_CONFIRM_MS     60000   // 绑定请求后等待用户按 OK 确认的时间
-#define RECORD_WAIT_MS      7000    // bounded wait for upload cancellation
+#define RECORD_WAIT_MS      MEETING_RECORD_WAIT_MS
 
 typedef enum {
     EV_BLE_RX,
@@ -115,6 +120,10 @@ static bool s_keep_session;         // 1A05 之后会话要跨越 BLE 断开留�
 static uint8_t s_rec_status = SC_REC_STOPPED;
 static uint32_t s_rec_file;
 static bool s_record_pending;
+static bool s_management_legacy_stopped;
+static meeting_record_preempt_async s_management_preempt;
+static atomic_bool s_management_preempt_requested;
+static uint32_t s_record_preempt_generation;
 static int64_t s_record_deadline;
 static bool s_connected;
 static bool s_subscribed;
@@ -402,6 +411,11 @@ static void xfer_task(void *arg)
     (void)arg;
     for (;;) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        if(atomic_exchange(&s_management_preempt_requested,false)){
+            uint32_t generation=atomic_load(&s_management_preempt.active);
+            bool stopped=meeting_management_controller_preempt((uint64_t)now_ms());
+            (void)meeting_record_preempt_finish(&s_management_preempt,generation,stopped);
+        }
         job_t job;
         lock();
         job = s_job;
@@ -455,7 +469,7 @@ static bool writer_drain(void)
     return meeting_frame_barrier_wait(&s_frame_barrier,200,writer_wait,NULL);
 }
 
-static bool record_start_owned(void)
+static bool record_start_owned(int64_t deadline)
 {
     if (s_link >= SC_LINK_WIFI_PENDING) {
         toast("Busy: Wi-Fi export");
@@ -466,6 +480,7 @@ static bool record_start_owned(void)
         (void)sc_audio_release_encoder_idle();
         toast("Mic unavailable");return false;
     }
+    if(!meeting_idle_before_deadline(now_ms(),deadline)){toast("Upload busy - start failed");return false;}
     bool created = s_rec_status == SC_REC_STOPPED;
     if (created) {
         refresh_usage();
@@ -489,7 +504,15 @@ static bool record_start_owned(void)
             toast("Cannot create file");
             return false;
         }
+        if (!sc_audio_reset_capture_fault()) {
+            if (sc_store_end(now_s(), 4) != ESP_OK) s_last_save_failed = true;
+            toast("Mic unavailable");return false;
+        }
         s_rec_file = sc_store_live_id();
+    }
+    if(!meeting_idle_before_deadline(now_ms(),deadline)){
+        if(created&&sc_store_end(now_s(),4)!=ESP_OK)s_last_save_failed=true;
+        toast("Upload busy - start failed");return false;
     }
     if (sc_audio_start() != ESP_OK) {
         if (created && sc_store_end(now_s(), 1) != ESP_OK) s_last_save_failed = true;
@@ -527,19 +550,30 @@ static bool test_record_once(unsigned seconds,unsigned run)
 static bool record_start(void)
 {
     if (s_rec_status == SC_REC_RECORDING) return true;
-    if (s_rec_status == SC_REC_PAUSED) return record_start_owned();
+    int64_t deadline=now_ms()+RECORD_WAIT_MS;
+    if (s_rec_status == SC_REC_PAUSED) return record_start_owned(deadline);
     if (s_record_pending) return false;
+    if(atomic_load(&s_management_preempt.busy)){toast("Bluetooth busy");return false;}
+    s_record_preempt_generation=0;
     if (s_link >= SC_LINK_WIFI_PENDING || !meeting_runtime_record_request()) return false;
     meeting_network_record_request();
+    if(meeting_management_controller_owns_radio()){
+        if(!meeting_record_preempt_begin(&s_management_preempt,&s_record_preempt_generation)){
+            (void)meeting_runtime_record_cancel();meeting_network_record_release();toast("Bluetooth busy");return false;
+        }
+        s_record_pending=true;s_record_deadline=deadline;
+        atomic_store(&s_management_preempt_requested,true);xTaskNotifyGive(s_xfer_task);
+        toast("Stopping upload...");return false;
+    }
     if (meeting_network_record_ready() && meeting_runtime_record_acquire()) {
-        if (record_start_owned()) return true;
+        if (record_start_owned(deadline)) return true;
         (void)meeting_runtime_record_end();
         (void)sc_audio_release_encoder_idle();
         meeting_network_record_release();
         return false;
     }
     s_record_pending=true;
-    s_record_deadline=now_ms()+RECORD_WAIT_MS;
+    s_record_deadline=deadline;
     toast("Stopping upload...");
     return false;
 }
@@ -561,9 +595,9 @@ static bool record_stop(uint8_t end_intent)
     if (s_rec_status == SC_REC_STOPPED) return true;
     if(!sc_audio_stop()){toast("Mic stop pending");return false;}
     if(!writer_drain()){toast("Storage write pending");return false;}
-    s_last_save_incomplete=meeting_frame_barrier_lost(&s_frame_barrier)>0;
+    s_last_save_incomplete=meeting_frame_barrier_lost(&s_frame_barrier)>0 || sc_audio_capture_fault();
     if(s_last_save_incomplete){
-        ESP_LOGW(TAG,"Audio frames lost: %u",meeting_frame_barrier_lost(&s_frame_barrier));
+        ESP_LOGW(TAG,"Audio incomplete: queue_lost=%u capture_fault=%d",meeting_frame_barrier_lost(&s_frame_barrier),sc_audio_capture_fault());
         end_intent=4;
     }
     esp_err_t save_result = sc_store_end(now_s(), end_intent);
@@ -1091,7 +1125,7 @@ static void tick(void)
     if(test_record_state==1&&t-test_record_start>=(int64_t)CONFIG_MEETING_SUPERVISED_TEST_RECORD_SECONDS*1000LL&&
        (CONFIG_MEETING_SUPERVISED_TEST_RECORD_SECONDS<1800||t-test_record_start>=1830000LL)){
         if(record_stop(CONFIG_MEETING_SUPERVISED_TEST_RECORD_SECONDS==1800?2:1)){
-            test_record_state=2;ESP_LOGI(TAG,"Automated acceptance recording saved");
+            test_record_state=2;if(s_last_save_failed)ESP_LOGE(TAG,"Automated acceptance recording save failed; file retained");else if(s_last_save_incomplete)ESP_LOGW(TAG,"Automated acceptance recording saved incomplete");else ESP_LOGI(TAG,"Automated acceptance recording saved");
         }
     }
     bool test_record_done=test_record_state==2;
@@ -1111,6 +1145,18 @@ static void tick(void)
     bool test_network_ready=network_state==MEETING_NETWORK_SYNCING;
 #if CONFIG_MEETING_SUPERVISED_TEST_AFTER_SYNC
     int64_t test_epoch=0;test_network_ready=meeting_network_trusted_time(&test_epoch);
+#if CONFIG_MEETING_SUPERVISED_TEST_RECORD_IN_WIFI_TRIAL
+    test_network_ready=test_network_ready&&meeting_management_controller_trial_active();
+#endif
+#if CONFIG_MEETING_SUPERVISED_TEST_RECORD_IN_BLE_WINDOW
+    test_network_ready=test_network_ready&&meeting_management_controller_window_active();
+#if CONFIG_MEETING_SUPERVISED_TEST_RECORD_IN_BLE_CONNECTED
+    test_network_ready=test_network_ready&&meeting_management_controller_window_connected();
+#if CONFIG_MEETING_SUPERVISED_TEST_RECORD_AFTER_BLE_AUTH
+    test_network_ready=test_network_ready&&meeting_management_controller_window_authenticated();
+#endif
+#endif
+#endif
 #endif
     if(meeting_commission_allowed()&&!test_preempt_state&&meeting_network_enabled()&&
        test_network_ready){
@@ -1146,9 +1192,9 @@ static void tick(void)
     if(test_preempt_state==2&&t-test_preempt_start>=test_duration_ms+30000){
         /* At the 30 minute limit the writer normally closes the recording.
          * A bounded grace period avoids interrupting that save. */
-        if(record_stop(1)){test_preempt_state=3;ESP_LOGI(TAG,"Automated online recording saved");}
+        if(record_stop(1)){test_preempt_state=3;if(s_last_save_failed)ESP_LOGE(TAG,"Automated online recording save failed; file retained");else if(s_last_save_incomplete)ESP_LOGW(TAG,"Automated online recording saved incomplete");else ESP_LOGI(TAG,"Automated online recording saved");}
     }else if(test_preempt_state==2&&test_duration_ms<1800000&&t-test_preempt_start>=test_duration_ms){
-        if(record_stop(1)){test_preempt_state=3;ESP_LOGI(TAG,"Automated online recording saved");}
+        if(record_stop(1)){test_preempt_state=3;if(s_last_save_failed)ESP_LOGE(TAG,"Automated online recording save failed; file retained");else if(s_last_save_incomplete)ESP_LOGW(TAG,"Automated online recording saved incomplete");else ESP_LOGI(TAG,"Automated online recording saved");}
     }
 #endif
 #if CONFIG_MEETING_SUPERVISED_TEST_PREEMPT_CHUNK
@@ -1167,7 +1213,7 @@ static void tick(void)
         test_chunk_record_state=3;ESP_LOGE(TAG,"TEST capture did not start");
     }
     if(test_chunk_record_state==2&&t-test_chunk_record_start>=60000){
-        if(record_stop(1)){test_chunk_record_state=3;ESP_LOGI(TAG,"TEST preempting capture saved");}
+        if(record_stop(1)){test_chunk_record_state=3;if(s_last_save_failed)ESP_LOGE(TAG,"TEST preempting capture save failed; file retained");else if(s_last_save_incomplete)ESP_LOGW(TAG,"TEST preempting capture saved incomplete");else ESP_LOGI(TAG,"TEST preempting capture saved");}
     }
 #endif
     if(s_setup_view.state!=MEETING_SETUP_IDLE){
@@ -1189,15 +1235,39 @@ static void tick(void)
         }
     }
 
+    lock();bool transfer_pending=s_job.active;unlock();
+    bool management_idle=s_rec_status==SC_REC_STOPPED&&!s_record_pending&&!s_xfer_busy&&!transfer_pending&&!s_bind_pending&&
+        s_setup_view.state==MEETING_SETUP_IDLE&&(s_link==SC_LINK_BLE_OFF||s_link==SC_LINK_ADVERTISING);
+    bool preempt_busy=atomic_load(&s_management_preempt.busy);
+    if(!preempt_busy)meeting_management_controller_tick((uint64_t)t,management_idle);
+    if(!preempt_busy&&meeting_management_controller_owns_radio()&&!s_management_legacy_stopped&&s_link==SC_LINK_ADVERTISING){
+        if(sc_ble_stop()==ESP_OK){
+            s_management_legacy_stopped=true;
+            lock();s_link=SC_LINK_BLE_OFF;s_connected=false;s_subscribed=false;unlock();
+        }else (void)meeting_management_controller_preempt((uint64_t)t);
+    }
+    if(!preempt_busy&&s_management_legacy_stopped&&!meeting_management_controller_owns_radio()&&
+       !meeting_network_enabled()&&s_rec_status==SC_REC_STOPPED&&!s_record_pending){
+        s_management_legacy_stopped=false;ble_start();
+    }
+
     if (s_record_pending) {
-        if (meeting_network_record_ready() && meeting_runtime_record_acquire()) {
+        bool preempt_ok=true;
+        bool preempt_complete=!s_record_preempt_generation||
+            meeting_record_preempt_take(&s_management_preempt,s_record_preempt_generation,&preempt_ok);
+        if (!meeting_idle_before_deadline(t, s_record_deadline)) {
+            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;
+            s_record_preempt_generation=0;
+            toast("Upload busy - start failed");send_record_status();
+        } else if(preempt_complete&&!preempt_ok){
+            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;
+            s_record_preempt_generation=0;toast("Bluetooth busy");send_record_status();
+        } else if (preempt_complete&&meeting_network_record_ready() && meeting_runtime_record_acquire()) {
             s_record_pending=false;
-            if (record_start_owned()) toast("Recording");
+            s_record_preempt_generation=0;
+            if (record_start_owned(s_record_deadline)) toast("Recording");
             else {(void)meeting_runtime_record_end();(void)sc_audio_release_encoder_idle();meeting_network_record_release();}
             send_record_status();
-        } else if (t >= s_record_deadline) {
-            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;
-            toast("Upload busy - start failed");send_record_status();
         }
     }
 
@@ -1398,6 +1468,7 @@ static void core_task(void *arg)
 esp_err_t sc_core_start(void)
 {
     meeting_runtime_init();
+    meeting_record_preempt_init(&s_management_preempt);atomic_init(&s_management_preempt_requested,false);
     s_mutex = xSemaphoreCreateRecursiveMutex();
     s_queue = xQueueCreate(8, sizeof(ev_t));
     s_frame_buf = xMessageBufferCreate(FRAME_BUF_BYTES);
@@ -1409,6 +1480,12 @@ esp_err_t sc_core_start(void)
     if (sc_store_has_empty_interrupted()) toast_for("Empty recording retained", 10000);
 
     sc_ble_mac(s_mac);
+    uint8_t management_mac[6];
+    bool management_enabled=true;
+#if CONFIG_MEETING_SUPERVISED_TEST_DISABLE_MGMT_WINDOWS
+    if(meeting_commission_allowed())management_enabled=false;
+#endif
+    if(management_enabled&&esp_efuse_mac_get_default(management_mac)==ESP_OK)(void)meeting_management_controller_init(management_mac);
     snprintf(s_serial, sizeof(s_serial), "apd3%02x%02x%02x%02x%02x%02x", s_mac[0], s_mac[1], s_mac[2],
              s_mac[3], s_mac[4], s_mac[5]);
 

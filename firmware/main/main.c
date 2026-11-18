@@ -120,6 +120,12 @@ void app_main(void)
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK) ESP_LOGE(TAG, "NVS 初始化失败: %s(未自动擦除)", esp_err_to_name(err));
 
+#if CONFIG_MEETING_AGENT_MGMT_PROVISION
+    extern bool meeting_agent_mgmt_provision_device(void);
+    if(err!=ESP_OK||!meeting_agent_mgmt_provision_device())ESP_LOGE(TAG,"Management provisioning failed");
+    return; /* Maintenance image must not start recording or network tasks. */
+#endif
+
 #if CONFIG_MEETING_DEVICE_TIME_PROBE
     extern bool meeting_time_probe_start(void);
     if (err == ESP_OK && meeting_time_probe_start()) return;

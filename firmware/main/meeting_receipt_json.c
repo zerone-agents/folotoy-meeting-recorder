@@ -105,28 +105,73 @@ done:
     if(!ok)memset(bitmap,0,bitmap_size);
     cJSON_Delete(root);return ok;
 }
+/* Parse the root and one chunk at a time. Holding the entire cJSON tree for
+ * 16 chunks can exhaust the small internal heap while TLS is active. Values
+ * are still parsed by cJSON; this routine only walks the enclosing grammar. */
+static void window_ws(const char **cursor,const char *end)
+{
+    while(*cursor<end && (**cursor==' '||**cursor=='\t'||**cursor=='\r'||**cursor=='\n'))++*cursor;
+}
+static cJSON *window_value(const char **cursor,const char *end)
+{
+    window_ws(cursor,end);if(*cursor>=end)return NULL;
+    const char *next=NULL;cJSON *value=cJSON_ParseWithLengthOpts(*cursor,(size_t)(end-*cursor),&next,0);
+    if(!value||!next||next<=*cursor||next>end){cJSON_Delete(value);return NULL;}
+    *cursor=next;return value;
+}
+static bool window_row(const cJSON *row,uint32_t first,meeting_remote_chunk entries[16])
+{
+    uint64_t n;if(!cJSON_IsObject(row))return false;
+    const cJSON *seq=unique(row,"seq"),*size=unique(row,"size"),*digest=unique(row,"digest"),*valid=unique(row,"valid");
+    if(!number(seq,first,first+15,&n))return false;
+    meeting_remote_chunk *entry=&entries[n-first];if(entry->present)return false;
+    if(!number(size,1,262144,&n)||!cJSON_IsString(digest)||strlen(digest->valuestring)!=64||!cJSON_IsBool(valid))return false;
+    entry->size=(uint32_t)n;entry->present=true;entry->valid=cJSON_IsTrue(valid);
+    for(unsigned i=0;i<32;i++){int h=nibble(digest->valuestring[i*2]),l=nibble(digest->valuestring[i*2+1]);if(h<0||l<0)return false;entry->digest[i]=(uint8_t)((h<<4)|l);}
+    return true;
+}
+static bool window_array(const char **cursor,const char *end,uint32_t first,meeting_remote_chunk entries[16])
+{
+    window_ws(cursor,end);if(*cursor>=end||*(*cursor)++!='[')return false;
+    window_ws(cursor,end);if(*cursor<end&&**cursor==']'){++*cursor;return true;}
+    for(unsigned count=0;count<16;count++){
+        cJSON *row=window_value(cursor,end);if(!row)return false;
+        bool ok=window_row(row,first,entries);cJSON_Delete(row);if(!ok)return false;
+        window_ws(cursor,end);if(*cursor>=end)return false;
+        if(**cursor==']'){++*cursor;return true;}
+        if(*(*cursor)++!=',')return false;
+    }
+    return false;
+}
 bool meeting_chunk_window_json_parse(const char *json,size_t length,int status,const char *id,
                                      uint32_t first,meeting_remote_chunk entries[16])
 {
-    if(!id||!entries||status!=200||first>8191||first%16)return false;
-    memset(entries,0,16*sizeof(*entries));cJSON *root=bounded_object(json,length);if(!root)return false;
-    const cJSON *rid=unique(root,"id"),*start=unique(root,"first"),*chunks=unique(root,"chunks");
-    uint64_t n;bool ok=false;
-    if(!cJSON_IsString(rid)||strcmp(rid->valuestring,id)||!number(start,0,8191,&n)||n!=first||!cJSON_IsArray(chunks))goto done;
-    const cJSON *row;
-    cJSON_ArrayForEach(row,chunks){
-        if(!cJSON_IsObject(row))goto done;
-        const cJSON *seq=unique(row,"seq"),*size=unique(row,"size"),*digest=unique(row,"digest"),*valid=unique(row,"valid");
-        if(!number(seq,first,first+15,&n))goto done;
-        meeting_remote_chunk *entry=&entries[n-first];if(entry->present)goto done;
-        if(!number(size,1,262144,&n)||!cJSON_IsString(digest)||strlen(digest->valuestring)!=64||!cJSON_IsBool(valid))goto done;
-        entry->size=(uint32_t)n;entry->present=true;entry->valid=cJSON_IsTrue(valid);
-        for(unsigned i=0;i<32;i++){int h=nibble(digest->valuestring[i*2]),l=nibble(digest->valuestring[i*2+1]);if(h<0||l<0)goto done;entry->digest[i]=(uint8_t)((h<<4)|l);}
+    if(!entries)return false;
+    memset(entries,0,16*sizeof(*entries));
+    if(!json||!id||status!=200||!length||length>4096||first>8191||first%16||!no_nul_escape(json,length))return false;
+    const char *cursor=json,*end=json+length;unsigned seen=0;bool ok=false;
+    window_ws(&cursor,end);if(cursor>=end||*cursor++!='{')goto done;
+    window_ws(&cursor,end);if(cursor<end&&*cursor=='}')goto done;
+    for(;;){
+        cJSON *key=window_value(&cursor,end);if(!cJSON_IsString(key)){cJSON_Delete(key);goto done;}
+        unsigned field=!strcmp(key->valuestring,"id")?1:!strcmp(key->valuestring,"first")?2:!strcmp(key->valuestring,"chunks")?4:0;
+        cJSON_Delete(key);if(field&&(seen&field))goto done;seen|=field;
+        window_ws(&cursor,end);if(cursor>=end||*cursor++!=':')goto done;
+        if(field==4){if(!window_array(&cursor,end,first,entries))goto done;}
+        else {
+            cJSON *value=window_value(&cursor,end);if(!value)goto done;
+            uint64_t n;bool valid=field==1?(cJSON_IsString(value)&&!strcmp(value->valuestring,id)):
+                field==2?(number(value,0,8191,&n)&&n==first):true;
+            cJSON_Delete(value);if(!valid)goto done;
+        }
+        window_ws(&cursor,end);if(cursor>=end)goto done;
+        if(*cursor=='}'){++cursor;break;}
+        if(*cursor++!=',')goto done;
     }
-    ok=true;
+    window_ws(&cursor,end);ok=seen==7&&cursor==end;
 done:
     if(!ok)memset(entries,0,16*sizeof(*entries));
-    cJSON_Delete(root);return ok;
+    return ok;
 }
 
 bool meeting_legacy_chunk_window_json_parse(const char *json,size_t length,int status,const char *id,
