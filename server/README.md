@@ -5,7 +5,7 @@
 ## 运行与接口
 
 - Node.js 22.13.0+；在本目录运行 `npm ci` 和 `npm test`。测试需要 FFmpeg/ffprobe、OpenSSL 与可用的本机回环端口。
-- 设置 `MEETING_ADMIN_TOKEN`（至少 7 个非空白字符）、不同的 `ZERONE_AGENT_HTTP_API_KEY`（至少 32 个非空白字符）和 `STEPFUN_API_KEY`。默认 HTTPS 模式还需要 `MEETING_TLS_CERT`、`MEETING_TLS_KEY`；通过可信反向代理终止 HTTPS 时可显式设置 `MEETING_HTTP=true`，并把服务限制在本机或可信网络。
+- 设置 `MEETING_ADMIN_TOKEN`（至少 7 个非空白字符）、不同的 `ZERONE_AGENT_HTTP_API_KEY`（至少 32 个非空白字符）和 `MEETING_ASR_API_KEY` 和 `MEETING_MINUTES_API_KEY`。默认 HTTPS 模式还需要 `MEETING_TLS_CERT`、`MEETING_TLS_KEY`；通过可信反向代理终止 HTTPS 时可显式设置 `MEETING_HTTP=true`，并把服务限制在本机或可信网络。
 - [本机运行](OPERATIONS.md) · [Compose 部署](../deploy/README.md) · [设备与管理 API](API.md) · [备份恢复](BACKUP.md) · [供应商数据](PROVIDER-DATA.md)。
 - 设备通过 Wi-Fi 提交录音，确认后服务以 StepFun SSE 和流式接口处理转录，默认使用 `step-3.7-flash` 生成纪要。模型调用可能计费。转录时间为估算，纪要必须人工核对；结果引用匹配不能保证语义正确。
 
@@ -19,9 +19,9 @@
 
 处理请求默认最多等待 10 分钟，超时后记录失败并按照重试策略重新调度；已丢失租约的晚到结果不会发布。重新转写保留历史版本并清除当前结果，直到新版本生成。SQLite 升级时会回填旧版已有的转写和纪要版本。
 
-转录可通过 `MEETING_ASR_BASE_URL` 和 `MEETING_ASR_MODEL` 配置，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `stepaudio-2.5-asr`。Base URL 填到 API 版本，服务会追加 `/audio/asr/sse`。API 密钥通过 `STEPFUN_API_KEY` 注入。服务收到该接口的完整结束事件后生成逐字稿，再处理纪要。新转录按文本分段，显示「时间戳不可用」。已有带时间戳的转录仍可查看和下载。
+转录可通过 `MEETING_ASR_BASE_URL` 和 `MEETING_ASR_MODEL` 配置，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `stepaudio-2.5-asr`。Base URL 填到 API 版本，服务会追加 `/audio/asr/sse`。API 密钥通过 `MEETING_ASR_API_KEY` 注入。服务收到该接口的完整结束事件后生成逐字稿，再处理纪要。新转录按文本分段，显示「时间戳不可用」。已有带时间戳的转录仍可查看和下载。
 
-开发版接口见 [API.md](API.md)。`MEETING_MINUTES_MODEL` 可覆盖默认 `step-3.7-flash`。长逐字稿按原始片段分批，逐批核验原文引用并拼接结果；它不会自动消除跨批重复或推断跨批上下文，质量仍需真实会议评估。
+开发版接口见 [API.md](API.md)。纪要生成使用 `MEETING_MINUTES_BASE_URL` 和 `MEETING_MINUTES_MODEL`，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `step-3.7-flash`。Base URL 填到 API 版本，Runtime 与纪要适配器共用这组配置，密钥通过 `MEETING_MINUTES_API_KEY` 注入。长逐字稿按原始片段分批，逐批核验原文引用并拼接结果；它不会自动消除跨批重复或推断跨批上下文，质量仍需真实会议评估。
 
 离线恢复工具及其前提见 [BACKUP.md](BACKUP.md)。必须保留恢复切换前最新的安全状态，不能在运行中直接替换 SQLite 数据库。
 
@@ -41,7 +41,7 @@
 
 长转写分批的有效结果会临时保存在数据库中，带转写版本、模型标识和实际提示内容的哈希；处理失败或重启后可复用已完成的批次。结果提交、重新转写和会议删除时会清理这些中间结果。模型调用仍可能在服务崩溃前已计费而结果未保存，不能保证外部调用恰好一次。
 
-真实服务验证脚本：设置 `STEPFUN_API_KEY` 后，在 `server/` 目录运行 `node src/live-workflow.mjs ../test-audio/distance-03.opus`。脚本会将所选录音发送给 StepFun，调用 ASR 和纪要模型，可能产生费用；该示例的字符错误率以此前的 0.3 米标准朗读文本为参考，其他录音的这个指标不适用。它只输出指标和计数，不打印密钥或逐字稿，结束后删除临时数据库；异常终止时应检查系统临时目录是否残留 `meeting-live-*`。模型供应商及其日志的处理不由本脚本控制。
+真实服务验证脚本：设置 `MEETING_ASR_API_KEY` 和 `MEETING_MINUTES_API_KEY` 后，在 `server/` 目录运行 `node src/live-workflow.mjs ../test-audio/distance-03.opus`。脚本会将所选录音发送给 StepFun，调用 ASR 和纪要模型，可能产生费用；该示例的字符错误率以此前的 0.3 米标准朗读文本为参考，其他录音的这个指标不适用。它只输出指标和计数，不打印密钥或逐字稿，结束后删除临时数据库；异常终止时应检查系统临时目录是否残留 `meeting-live-*`。模型供应商及其日志的处理不由本脚本控制。
 
 服务启动要求 `MEETING_DATA_DIR` 及已有数据库文件和 SQLite 附属文件由当前用户持有，且不允许组或其他用户访问；进程以 `umask 077` 创建新文件。若已有目录权限不符合要求，启动会报错，需要管理员确认后修正。权限位检查不能替代对文件系统 ACL、备份和主机安全的检查。
 

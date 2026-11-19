@@ -7,7 +7,7 @@
 1. 安装 Node.js 22.13 或更高版本，在 `server/` 运行 `npm ci` 和 `npm test`。HTTPS 进程测试需要允许本机回环地址监听；音频解码测试需要 `ffmpeg`、`ffprobe`，证书测试需要 `openssl`。
 2. 准备当前用户独占访问的数据目录（权限 `0700`）以及私有的 TLS 私钥文件（权限 `0600`）。设置 `MEETING_DATA_DIR`、`MEETING_TLS_CERT` 和 `MEETING_TLS_KEY` 为绝对路径。服务不会自动放宽现有目录权限。
 3. 证书必须在有效期内，与私钥匹配，并包含客户端实际访问的主机名。浏览器、设备或 `curl` 必须信任证书链并校验主机名；本机测试用证书只能证明本机测试，设备联网还需确定可达地址、证书信任及首次校时方案。
-4. 生成并妥善保管独立的随机管理员令牌，设置为 `MEETING_ADMIN_TOKEN`；设置另一个不同的随机长值为 `ZERONE_AGENT_HTTP_API_KEY`，该值仅用于服务进程内 Runtime 接口。管理员令牌至少 7 个字符，Runtime 密钥至少 32 个字符，均不含空白。`STEPFUN_API_KEY` 由安全的本机凭据渠道注入；不要把任何令牌写入仓库或命令历史。
+4. 生成并妥善保管独立的随机管理员令牌，设置为 `MEETING_ADMIN_TOKEN`；设置另一个不同的随机长值为 `ZERONE_AGENT_HTTP_API_KEY`，该值仅用于服务进程内 Runtime 接口。管理员令牌至少 7 个字符，Runtime 密钥至少 32 个字符，均不含空白。`MEETING_ASR_API_KEY` 和 `MEETING_MINUTES_API_KEY` 由安全的本机凭据渠道注入；不要把任何令牌写入仓库或命令历史。
 5. 可选设置 `MEETING_PORT`（1–65535，默认 3443）、`MEETING_HOST`（默认 `127.0.0.1`）、`MEETING_WORKER_CONCURRENCY`（1–4，默认 2）、`MEETING_STORAGE_LIMIT_BYTES`（正整数，逻辑音频字节上限）和 `MEETING_RETENTION_DAYS`（正整数；不设置则不自动删除）。配额不包含 SQLite 索引、WAL 和备份。改变监听地址前须确认网络防护、TLS 和设备信任，公网暴露还需要边界限流。
 
 ## 运行与检查
