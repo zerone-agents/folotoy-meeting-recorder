@@ -14,7 +14,12 @@ esp_err_t esp_wifi_init(const wifi_init_config_t *x){(void)x;return ESP_OK;} esp
 esp_err_t esp_wifi_set_storage(int x){ram=x==WIFI_STORAGE_RAM;return ESP_OK;} esp_err_t esp_wifi_set_mode(int x){mode=x;return ESP_OK;}
 esp_err_t esp_wifi_set_config(int x,const wifi_config_t *c){(void)x;assert(!memcmp(c->sta.ssid,"wifi",4));return ESP_OK;}
 esp_err_t esp_wifi_start(void){started=1;return ESP_OK;} esp_err_t esp_wifi_stop(void){started=0;return ESP_OK;} esp_err_t esp_wifi_connect(void){return fail_connect?7:ESP_OK;}
-int main(void){assert(meeting_sta_reconnect()!=ESP_OK);ap=1;assert(meeting_sta_start("wifi","password")!=ESP_OK);ap=0;assert(meeting_sta_start("wifi","password")==ESP_OK);assert(started&&ram&&mode==WIFI_MODE_STA);cb(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,NULL);assert(meeting_sta_has_ip());cb(NULL,WIFI_EVENT,WIFI_EVENT_STA_DISCONNECTED,NULL);assert(!meeting_sta_has_ip());fail_connect=1;assert(meeting_sta_reconnect()!=ESP_OK);fail_connect=0;assert(meeting_sta_reconnect()==ESP_OK);
+int main(void){assert(meeting_sta_reconnect()!=ESP_OK);ap=1;assert(meeting_sta_start("wifi","password")!=ESP_OK);ap=0;assert(meeting_sta_start("wifi","password")==ESP_OK);assert(started&&ram&&mode==WIFI_MODE_STA);cb(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,NULL);assert(meeting_sta_has_ip());cb(NULL,WIFI_EVENT,WIFI_EVENT_STA_DISCONNECTED,NULL);assert(!meeting_sta_has_ip());
+wifi_event_sta_disconnected_t missing={.reason=WIFI_REASON_NO_AP_FOUND};
+cb(NULL,WIFI_EVENT,WIFI_EVENT_STA_DISCONNECTED,&missing);assert(meeting_sta_ap_missing());
+cb(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,NULL);assert(!meeting_sta_ap_missing());
+cb(NULL,WIFI_EVENT,WIFI_EVENT_STA_DISCONNECTED,NULL);assert(!meeting_sta_ap_missing());
+fail_connect=1;assert(meeting_sta_reconnect()!=ESP_OK);fail_connect=0;assert(meeting_sta_reconnect()==ESP_OK);
 fail_unregister=1;assert(meeting_sta_stop()!=ESP_OK&&meeting_sta_running()&&started);cb(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,NULL);assert(!meeting_sta_has_ip());
 assert(meeting_sta_stop()==ESP_OK&&!meeting_sta_running());cb(NULL,IP_EVENT,IP_EVENT_STA_GOT_IP,NULL);assert(!meeting_sta_has_ip());
 assert(meeting_sta_start("wifi","password")==ESP_OK);fail_wifi_unregister=1;assert(meeting_sta_stop()!=ESP_OK&&meeting_sta_running()&&started);assert(meeting_sta_stop()==ESP_OK&&!meeting_sta_running());

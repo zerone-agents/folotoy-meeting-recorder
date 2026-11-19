@@ -50,3 +50,5 @@ void meeting_network_management_release(void);
 bool meeting_network_apply_wifi_slot(const meeting_wifi_slots_io *slots,uint64_t generation,
                                      const uint8_t request_id[16],const uint8_t digest[32]);
 meeting_network_state meeting_network_get_state(void);
+
+void meeting_network_target_ssid(char out[33]);

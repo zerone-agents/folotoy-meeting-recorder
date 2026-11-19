@@ -18,3 +18,5 @@ esp_err_t meeting_sta_test_no_gateway(void);
 /* Probe-only, volatile override after station gets an IP. */
 esp_err_t meeting_sta_probe_dns(const char *address);
 #endif
+
+bool meeting_sta_ap_missing(void);

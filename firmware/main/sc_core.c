@@ -7,6 +7,9 @@
 //   sc_audio —— 采集编码,帧回调直接写存储(sc_store 内部加锁)。
 //   httpd    —— Wi-Fi WebSocket 命令在 HTTP 任务内同步处理(传输期间 BLE 已关闭)。
 #include "sc_core.h"
+#include "sc_ui.h"
+#include "esp_wifi.h"
+#include "meeting_pairing_ble.h"
 
 #include "bsp_battery.h"
 #include "sc_audio.h"
@@ -17,6 +20,7 @@
 #include "sc_xfer.h"
 #include "meeting_runtime.h"
 #include "meeting_network.h"
+#include "meeting_sta.h"
 #include "meeting_idle_coordinator.h"
 #include "meeting_record_preempt_async.h"
 #include "meeting_management_controller.h"
@@ -1080,7 +1084,11 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev)
             bool saved=record_stop(1);
             send_record_status();
             if(saved&&!s_last_save_incomplete)toast("Saved");
-        } else setup_begin();
+        } else if(sc_ui_device_page()) {
+            if(meeting_network_enabled()){
+                if(!meeting_management_controller_toggle())toast("Setup unavailable");
+            }else setup_begin();
+        }
     }
 }
 
@@ -1239,7 +1247,11 @@ static void tick(void)
     bool management_idle=s_rec_status==SC_REC_STOPPED&&!s_record_pending&&!s_xfer_busy&&!transfer_pending&&!s_bind_pending&&
         s_setup_view.state==MEETING_SETUP_IDLE&&(s_link==SC_LINK_BLE_OFF||s_link==SC_LINK_ADVERTISING);
     bool preempt_busy=atomic_load(&s_management_preempt.busy);
-    if(!preempt_busy)meeting_management_controller_tick((uint64_t)t,management_idle);
+    if(!preempt_busy){
+        if(!sc_ui_device_page()&&s_setup_view.state==MEETING_SETUP_PAIRING)
+            (void)meeting_setup_cancel();
+        meeting_management_controller_tick((uint64_t)t,management_idle);
+    }
     if(!preempt_busy&&meeting_management_controller_owns_radio()&&!s_management_legacy_stopped&&s_link==SC_LINK_ADVERTISING){
         if(sc_ble_stop()==ESP_OK){
             s_management_legacy_stopped=true;
@@ -1565,6 +1577,17 @@ void sc_core_snapshot(sc_snapshot_t *out)
     out->delete_review_file=s_delete_review_file;
     out->delete_review=s_delete_review;
     unlock();
+    meeting_network_target_ssid(out->target_ssid);
+    out->wifi_ap_missing=meeting_sta_ap_missing();
+    wifi_ap_record_t ap;
+    if(esp_wifi_sta_get_ap_info(&ap)==ESP_OK){
+        memcpy(out->connected_ssid,ap.ssid,sizeof(out->connected_ssid)-1);
+        out->wifi_has_ip=meeting_sta_has_ip();
+    }
+    out->config_ble_active=meeting_management_controller_window_active()||out->setup.state==MEETING_SETUP_PAIRING;
+    out->config_ble_connected=out->config_ble_active&&meeting_pairing_ble_connected();
+    out->config_ble_authenticated=out->config_ble_connected&&meeting_pairing_ble_authenticated();
+    if(out->config_ble_authenticated)meeting_pairing_ble_peer_name(out->config_peer_name);
     out->rec_seconds = out->rec_file ? sc_store_live_frames() / 50u : 0;
     out->level = sc_audio_level();
     out->streaming = s_xfer_busy;

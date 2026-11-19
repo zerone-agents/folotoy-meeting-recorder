@@ -11,25 +11,26 @@
 static esp_netif_t *netif;
 static esp_event_handler_instance_t wifi_handler, ip_handler;
 static bool wifi_initialized, started;
-static atomic_bool has_ip, accept_events;
+static atomic_bool has_ip, accept_events, ap_missing;
 static const char *TAG="meeting_sta";
 static void event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
-    (void)arg; (void)data;
+    (void)arg;
     if (!atomic_load(&accept_events)) return;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         atomic_store(&has_ip, false);
         const wifi_event_sta_disconnected_t *disconnected=data;
         ESP_LOGW(TAG,"Wi-Fi disconnected: reason=%u",disconnected?(unsigned)disconnected->reason:0u);
-        (void)disconnected;
+        atomic_store(&ap_missing,disconnected&&disconnected->reason==WIFI_REASON_NO_AP_FOUND);
     }
-    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {atomic_store(&has_ip, true);ESP_LOGI(TAG,"Wi-Fi acquired IP");}
+    if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {atomic_store(&ap_missing,false);atomic_store(&has_ip, true);ESP_LOGI(TAG,"Wi-Fi acquired IP");}
 }
 
 esp_err_t meeting_sta_start(const char *ssid, const char *password)
 {
     if (!ssid || !password || !*ssid || strlen(ssid)>32 || strlen(password)>63 || started || netif || sc_wifi_running()) return ESP_ERR_INVALID_ARG;
     atomic_store(&has_ip, false);
+    atomic_store(&ap_missing,false);
     esp_err_t err=esp_netif_init();
     if (err!=ESP_OK && err!=ESP_ERR_INVALID_STATE) return err;
     err=esp_event_loop_create_default();
@@ -58,6 +59,7 @@ fail:
 esp_err_t meeting_sta_stop(void)
 {
     atomic_store(&accept_events,false);
+    atomic_store(&ap_missing,false);
     atomic_store(&has_ip,false);
     if(ip_handler){
         esp_err_t e=esp_event_handler_instance_unregister(IP_EVENT,IP_EVENT_STA_GOT_IP,ip_handler);
@@ -106,3 +108,5 @@ esp_err_t meeting_sta_reconnect(void)
     if(!started||!atomic_load(&accept_events))return ESP_ERR_INVALID_STATE;
     return atomic_load(&has_ip)?ESP_OK:esp_wifi_connect();
 }
+
+bool meeting_sta_ap_missing(void){return atomic_load(&accept_events)&&atomic_load(&ap_missing);}

@@ -16,6 +16,119 @@
 
 #if MEETING_FONT_16
 
+/* U+627E supplement from @fontsource/noto-sans-sc 5.3.1, SIL OFL 1.1. */
+/*-----------------
+ *    BITMAPS
+ *----------------*/
+
+/*Store the image of the glyphs*/
+static LV_ATTRIBUTE_LARGE_CONST const uint8_t zhao_glyph_bitmap[] = {
+    /* U+627E "找" */
+    0x0, 0xf, 0x30, 0x0, 0x6b, 0x7, 0x20, 0x0,
+    0x0, 0xf, 0x30, 0x0, 0x5d, 0x7, 0xe3, 0x0,
+    0x2, 0x2f, 0x52, 0x0, 0x4e, 0x0, 0x69, 0x0,
+    0x4f, 0xff, 0xff, 0x20, 0x5f, 0x56, 0x8a, 0xb0,
+    0x0, 0xf, 0x30, 0x9f, 0xff, 0xeb, 0x97, 0x60,
+    0x0, 0xf, 0x30, 0x11, 0xf, 0x30, 0x3, 0x0,
+    0x0, 0xf, 0x45, 0x10, 0xd, 0x60, 0x3f, 0x10,
+    0x4, 0x8f, 0xfc, 0x20, 0xa, 0x90, 0xd7, 0x0,
+    0x4e, 0xaf, 0x40, 0x0, 0x6, 0xda, 0xc0, 0x0,
+    0x0, 0xf, 0x30, 0x0, 0x2, 0xff, 0x20, 0x0,
+    0x0, 0xf, 0x30, 0x0, 0xa, 0xfb, 0x0, 0x63,
+    0x0, 0xf, 0x30, 0x2, 0xcd, 0x8f, 0x20, 0xa6,
+    0x1, 0x1f, 0x20, 0x9f, 0xa0, 0xc, 0xd6, 0xe2,
+    0xb, 0xfc, 0x0, 0x33, 0x0, 0x1, 0xaf, 0xb0,
+    0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0
+};
+
+
+/*---------------------
+ *  GLYPH DESCRIPTION
+ *--------------------*/
+
+static const lv_font_fmt_txt_glyph_dsc_t zhao_glyph_dsc[] = {
+    {.bitmap_index = 0, .adv_w = 0, .box_w = 0, .box_h = 0, .ofs_x = 0, .ofs_y = 0} /* id = 0 reserved */,
+    {.bitmap_index = 0, .adv_w = 256, .box_w = 16, .box_h = 15, .ofs_x = 0, .ofs_y = -2}
+};
+
+/*---------------------
+ *  CHARACTER MAPPING
+ *--------------------*/
+
+
+
+/*Collect the unicode lists and glyph_id offsets*/
+static const lv_font_fmt_txt_cmap_t zhao_cmaps[] =
+{
+    {
+        .range_start = 25214, .range_length = 1, .glyph_id_start = 1,
+        .unicode_list = NULL, .glyph_id_ofs_list = NULL, .list_length = 0, .type = LV_FONT_FMT_TXT_CMAP_FORMAT0_TINY
+    }
+};
+
+
+
+/*--------------------
+ *  ALL CUSTOM DATA
+ *--------------------*/
+
+#if LVGL_VERSION_MAJOR == 8
+/*Store all the custom data of the font*/
+static  lv_font_fmt_txt_glyph_cache_t zhao_cache;
+#endif
+
+#if LVGL_VERSION_MAJOR >= 8
+static const lv_font_fmt_txt_dsc_t zhao_font_dsc = {
+#else
+static lv_font_fmt_txt_dsc_t zhao_font_dsc = {
+#endif
+    .glyph_bitmap = zhao_glyph_bitmap,
+    .glyph_dsc = zhao_glyph_dsc,
+    .cmaps = zhao_cmaps,
+    .kern_dsc = NULL,
+    .kern_scale = 0,
+    .cmap_num = 1,
+    .bpp = 4,
+    .kern_classes = 0,
+    .bitmap_format = 0,
+#if LVGL_VERSION_MAJOR == 8
+    .cache = &zhao_cache
+#endif
+};
+
+
+
+/*-----------------
+ *  PUBLIC FONT
+ *----------------*/
+
+/*Initialize a public general font descriptor*/
+#if LVGL_VERSION_MAJOR >= 8
+static const lv_font_t meeting_font_zhao = {
+#else
+static lv_font_t meeting_font_zhao = {
+#endif
+    .get_glyph_dsc = lv_font_get_glyph_dsc_fmt_txt,    /*Function pointer to get glyph's data*/
+    .get_glyph_bitmap = lv_font_get_bitmap_fmt_txt,    /*Function pointer to get glyph's bitmap*/
+    .line_height = 15,          /*The maximum line height required by the font*/
+    .base_line = 2,             /*Baseline measured from the bottom of the line*/
+#if !(LVGL_VERSION_MAJOR == 6 && LVGL_VERSION_MINOR == 0)
+    .subpx = LV_FONT_SUBPX_NONE,
+#endif
+#if LV_VERSION_CHECK(7, 4, 0) || LVGL_VERSION_MAJOR >= 8
+    .underline_position = -2,
+    .underline_thickness = 1,
+#endif
+    .dsc = &zhao_font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
+#if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
+    .fallback = NULL,
+#endif
+    .user_data = NULL,
+};
+
+
+
+
 /*-----------------
  *    BITMAPS
  *----------------*/
@@ -4108,7 +4221,7 @@ lv_font_t meeting_font_16 = {
 #endif
     .dsc = &font_dsc,          /*The custom font data. Will be accessed by `get_glyph_bitmap/dsc` */
 #if LV_VERSION_CHECK(8, 2, 0) || LVGL_VERSION_MAJOR >= 9
-    .fallback = NULL,
+    .fallback = &meeting_font_zhao,
 #endif
     .user_data = NULL,
 };

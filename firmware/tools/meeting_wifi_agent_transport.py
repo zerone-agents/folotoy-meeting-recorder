@@ -12,7 +12,7 @@ _scan_lock=asyncio.Lock()
 class BeforeSendError(RuntimeError):
     """The connection failed before any management payload was sent."""
 
-async def send_request(payload,secret,device_name,security_module,transport_module,*,discovery,bleak_module,send=send_frames,poll=command,sleep=asyncio.sleep,max_polls=30,timeout=60,disconnect_timeout=5):
+async def send_request(payload,secret,device_name,security_module,transport_module,*,discovery,bleak_module,send=send_frames,poll=command,sleep=asyncio.sleep,max_polls=30,timeout=60,disconnect_timeout=5,peer_name=None):
     if not isinstance(payload,bytes) or not 21<=len(payload)<=118 or payload[:4]!=b'MWC1':
         raise ValueError('invalid management message')
     if not isinstance(secret,bytes) or len(secret)!=32 or not any(secret):
@@ -42,6 +42,11 @@ async def send_request(payload,secret,device_name,security_module,transport_modu
             finally:
                 scanner.discover=original
         await send(transport,security,payload)
+        if peer_name:
+            name=''.join(c for c in peer_name if ' '<=c<='~').strip()[:32]
+            if name:
+                # Older firmware can reject the optional display hint.
+                await poll(transport,security,b'\x06'+name.encode('ascii'))
         for _ in range(max_polls):
             result=await poll(transport,security,b'\x04')
             if len(result)!=1:

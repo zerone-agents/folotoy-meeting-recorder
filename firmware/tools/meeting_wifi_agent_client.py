@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import getpass
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -152,7 +153,7 @@ async def _cli(args):
             raise BeforeSendError('device discovery failed before management send') from exc
         print('正在认证设备', flush=True)
         return await send_request(packet, secret, args.name, security, transport,
-                                  discovery=discovery, bleak_module=bleak)
+                                  discovery=discovery, bleak_module=bleak, peer_name=socket.gethostname())
 
     with OperationStore(args.store) as store:
         if args.action == 'abandon':

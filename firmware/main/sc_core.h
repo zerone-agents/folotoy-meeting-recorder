@@ -46,6 +46,11 @@ typedef struct {
     char ssid[33];
     char password[65];
     char serial[17];
+    char connected_ssid[33];
+    char config_peer_name[33];
+    char target_ssid[33];
+    bool wifi_has_ip, wifi_ap_missing;
+    bool config_ble_active, config_ble_connected, config_ble_authenticated;
     uint8_t mac[6];
     char toast[40];             // 最近一条状态提示(空 = 无)
     meeting_setup_view setup;
