@@ -21,7 +21,7 @@
 
 转录可通过 `MEETING_ASR_BASE_URL` 和 `MEETING_ASR_MODEL` 配置，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `stepaudio-2.5-asr`。Base URL 填到 API 版本，服务会追加 `/audio/asr/sse`。API 密钥通过 `STEPFUN_API_KEY` 注入。服务收到该接口的完整结束事件后生成逐字稿，再处理纪要。新转录按文本分段，显示「时间戳不可用」。已有带时间戳的转录仍可查看和下载。
 
-开发版接口见 [API.md](API.md)。`MEETING_MINUTES_MODEL` 可覆盖默认 `step-3.7-flash`。长逐字稿按原始片段分批，逐批核验原文引用并拼接结果；它不会自动消除跨批重复或推断跨批上下文，质量仍需真实会议评估。
+开发版接口见 [API.md](API.md)。纪要生成使用 `MEETING_MINUTES_BASE_URL` 和 `MEETING_MINUTES_MODEL`，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `step-3.7-flash`。Base URL 填到 API 版本，Runtime 与纪要适配器共用这组配置，密钥通过 `STEPFUN_API_KEY` 注入。长逐字稿按原始片段分批，逐批核验原文引用并拼接结果；它不会自动消除跨批重复或推断跨批上下文，质量仍需真实会议评估。
 
 离线恢复工具及其前提见 [BACKUP.md](BACKUP.md)。必须保留恢复切换前最新的安全状态，不能在运行中直接替换 SQLite 数据库。
 
