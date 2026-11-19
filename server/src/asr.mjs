@@ -1,9 +1,9 @@
 /** Consume UTF-8 SSE incrementally; a completed event is the only success. */
-export async function transcribe(audio, { apiKey, baseURL = 'https://api.stepfun.com/step_plan/v1', fetchImpl = fetch, signal, onDelta } = {}) {
+export async function transcribe(audio, { apiKey, baseURL = 'https://api.stepfun.com/step_plan/v1', model = 'stepaudio-2.5-asr', fetchImpl = fetch, signal, onDelta } = {}) {
   if (!apiKey || !Buffer.isBuffer(audio) || !audio.length) throw new Error('invalid_asr_input');
   const response = await fetchImpl(`${baseURL.replace(/\/$/,'')}/audio/asr/sse`, {
     method:'POST', headers:{Authorization:`Bearer ${apiKey}`,Accept:'text/event-stream','Content-Type':'application/json'}, signal,
-    body:JSON.stringify({audio:{data:audio.toString('base64'),input:{transcription:{language:'zh',model:'stepaudio-2.5-asr',enable_itn:true},format:{type:'ogg'}}}}),
+    body:JSON.stringify({audio:{data:audio.toString('base64'),input:{transcription:{language:'zh',model,enable_itn:true},format:{type:'ogg'}}}}),
   });
   if (!response.ok || !response.body) throw new Error(`asr_http_${response.status}`);
   const decoder=new TextDecoder('utf-8',{fatal:true});let pending='', eventLines=[], eventSize=0, final;

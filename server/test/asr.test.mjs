@@ -19,3 +19,18 @@ test('does not accept a final event interrupted before its SSE delimiter',async(
  a.equal(await transcribe(Buffer.from('x'),{apiKey:'test',fetchImpl:fake([event+'\n\n'])}),'最终');
 });
 test('provider error body is never included in the ASR error',async()=>{const secret='sensitive-audio-transcript-or-key';const provider=async()=>new Response(secret,{status:403});await a.rejects(()=>transcribe(Buffer.from('x'),{apiKey:'test',fetchImpl:provider}),error=>{a.equal(error.message,'asr_http_403');a.equal(error.message.includes(secret),false);return true})});
+
+test('uses the configured ASR base URL and model', async () => {
+ const fetchImpl = async (url, request) => {
+  a.equal(String(url), 'https://asr.example.test/custom/v1/audio/asr/sse');
+  a.equal(JSON.parse(request.body).audio.input.transcription.model, 'custom-asr');
+  return fake(['data: {"type":"transcript.text.done","text":"最终"}\n\n'])();
+ };
+ const result = await transcribe(Buffer.from('audio'), {
+  apiKey: 'test',
+  baseURL: 'https://asr.example.test/custom/v1',
+  model: 'custom-asr',
+  fetchImpl,
+ });
+ a.equal(result, '最终');
+});
