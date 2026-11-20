@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { toOgg,validateAudioStructure } from './audio.mjs';
 import { segmentTranscript,segmentTimedTranscript,validateMinutes } from './minutes.mjs';
-const failureCodes=new Set(['invalid_evidence','invalid_evidence_missing','invalid_evidence_format','invalid_evidence_version','invalid_evidence_segment','invalid_evidence_range','invalid_evidence_quote','invalid_evidence_ambiguous','invalid_minutes','provider_timeout','integrity','invalid_audio','unsupported_audio','invalid_transcript','asr_incomplete','asr_empty','asr_invalid_event','asr_event_too_large','asr_provider_error','minutes_incomplete','minutes_invalid_json','minutes_provider_failed','asr_http_400','asr_http_401','asr_http_403','asr_http_413','asr_http_429','asr_http_500','asr_http_502','asr_http_503','asr_http_504']);
+const failureCodes=new Set(['invalid_evidence','invalid_evidence_missing','invalid_evidence_format','invalid_evidence_version','invalid_evidence_segment','invalid_evidence_range','invalid_evidence_quote','invalid_evidence_ambiguous','invalid_minutes','provider_timeout','integrity','invalid_audio','unsupported_audio','invalid_transcript','asr_incomplete','asr_empty','asr_invalid_event','asr_event_too_large','asr_provider_error','minutes_incomplete','minutes_invalid_json','minutes_provider_failed','minutes_response_too_large','asr_http_400','asr_http_401','asr_http_403','asr_http_413','asr_http_429','asr_http_500','asr_http_502','asr_http_503','asr_http_504']);
 /** One bounded claim. External calls are at-least-once; publication is fenced. */
 export async function processOne(store,id,stage,{asr,minutes,leaseSeconds=90,activeWork,asrProgress,shutdownSignal,requestTimeoutMs=600000}={}) {
  if(!Number.isSafeInteger(requestTimeoutMs)||requestTimeoutMs<1)throw new Error('invalid_timeout');
@@ -17,7 +17,7 @@ export async function processOne(store,id,stage,{asr,minutes,leaseSeconds=90,act
    const transcript=Array.isArray(text)?segmentTimedTranscript(text,randomUUID()):segmentTranscript(text,randomUUID());transcript.durationSeconds=durationSeconds;transcript.recordedAt=job.recorded_at;transcript.timeTrust=job.time_trust;
    if(!lost)store.publish(lease,JSON.stringify(transcript));
   }else{
-   const transcript={...JSON.parse(job.transcript),recordedAt:job.recorded_at,timeTrust:job.time_trust};const raw=await call(()=>minutes(transcript,{signal:abort.signal,checkpoint:{get:key=>store.batchGet(lease,transcript.versionId,key),put:(key,data)=>store.batchPut(lease,transcript.versionId,key,data)}}));
+   const transcript={...JSON.parse(job.transcript),recordedAt:job.recorded_at,timeTrust:job.time_trust};const raw=await call(()=>minutes(transcript,{signal:abort.signal,onFailure:record=>store.saveMinutesFailure(lease,transcript.versionId,record),checkpoint:{get:key=>store.batchGet(lease,transcript.versionId,key),put:(key,data)=>store.batchPut(lease,transcript.versionId,key,data)}}));
    const out=validateMinutes(raw,transcript,job.reason!=='user',job.reason);
    if(!lost)store.publish(lease,JSON.stringify(out));
   }

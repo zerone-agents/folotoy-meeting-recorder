@@ -6,7 +6,7 @@ import {createRuntime} from '@zerone-agent/agent-runtime';
 import {registerMinutesAgent} from '../src/register-agent.mjs';
 import {createRuntimeMinutes} from '../src/runtime-minutes.mjs';
 
-test('configured runtime does not persist or log synthetic transcript and provider error body',async()=>{
+test('configured runtime keeps synthetic transcript out of storage and regular logs',async()=>{
  const dir=mkdtempSync(join(tmpdir(),'meeting-runtime-privacy-')),oldFetch=globalThis.fetch,oldKey=process.env.ZERONE_AGENT_HTTP_API_KEY,key='r'.repeat(40),sentinel='MEETING_PRIVATE_SENTINEL_87246';process.env.ZERONE_AGENT_HTTP_API_KEY=key;let host;const logs=[],original={log:console.log,warn:console.warn,error:console.error};
  for(const name of Object.keys(original))console[name]=(...args)=>logs.push(args.map(String).join(' '));
  globalThis.fetch=async()=>Response.json({error:{message:sentinel}},{status:403});
