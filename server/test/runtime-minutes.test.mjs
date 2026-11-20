@@ -77,3 +77,21 @@ test('an aborted Runtime request does not capture meeting content', async () => 
   onFailure: () => a.fail('cancelled meeting content must not be captured'),
  }), /meeting_deleted/);
 });
+
+test('oversized Runtime response is cancelled and only a bounded prefix is saved', async () => {
+ let cancelled = false;
+ const chunk = new Uint8Array(512 * 1024).fill(97);
+ const stream = new ReadableStream({
+  pull(controller) { controller.enqueue(chunk); },
+  cancel() { cancelled = true; },
+ });
+ const host = {app: {request: async () => new Response(stream)}};
+ const failures = [];
+ await a.rejects(createRuntimeMinutes(host, 'key')(t, {
+  onFailure: record => failures.push(record),
+ }), /minutes_response_too_large/);
+ a.equal(cancelled, true);
+ a.equal(failures.length, 1);
+ a.equal(failures[0].response.truncated, true);
+ a.equal(Buffer.byteLength(failures[0].response.body), 1024 * 1024);
+});

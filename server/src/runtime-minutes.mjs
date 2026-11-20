@@ -4,6 +4,28 @@ import { locateModelEvidence } from './evidence.mjs';
 
 const DEFAULT_BATCH_MAX_POINTS = 200_000;
 
+const MAX_RUNTIME_BODY_BYTES = 1024 * 1024;
+
+async function readRuntimeBody(stream) {
+ if(!stream)return {body:'',truncated:false};
+ const reader=stream.getReader();
+ const decoder=new TextDecoder();
+ let remaining=MAX_RUNTIME_BODY_BYTES,body='';
+ try {
+  for(;;){
+   const {done,value}=await reader.read();
+   if(done)return {body:body+decoder.decode(),truncated:false};
+   if(value.byteLength>remaining){
+    body+=decoder.decode(value.subarray(0,remaining),{stream:true});
+    void reader.cancel().catch(()=>{});
+    return {body,truncated:true};
+   }
+   body+=decoder.decode(value,{stream:true});
+   remaining-=value.byteLength;
+  }
+ }finally{reader.releaseLock()}
+}
+
 /** Bound each model request while keeping the original version and segment IDs. */
 export function transcriptBatches(transcript, maxPoints=DEFAULT_BATCH_MAX_POINTS) {
  if(!transcript || typeof transcript.versionId!=='string' || !Array.isArray(transcript.segments) || transcript.segments.length===0 || !Number.isInteger(maxPoints) || maxPoints<1) throw new Error('invalid_transcript');
@@ -38,11 +60,12 @@ export function createRuntimeMinutes(host,runtimeKey,{maxPoints=DEFAULT_BATCH_MA
    if(prior!==null&&prior!==undefined){let parsed;try{parsed=JSON.parse(prior)}catch{throw new Error('invalid_minutes')};results.push(validateMinutes(parsed,part,false,null));continue;}
    const path='/v1/agents/minutes/runs';
    const requestBody=JSON.stringify({message:prompt});
-   let status=null,responseBody=null,valid;
+   let status=null,responseBody=null,responseTruncated=false,valid;
    try {
     const res=await host.app.request(path,{method:'POST',signal,headers:{'content-type':'application/json','accept':'application/json','x-api-key':runtimeKey},body:requestBody});
     status=res.status;
-    responseBody=await res.text();
+    ({body:responseBody,truncated:responseTruncated}=await readRuntimeBody(res.body));
+    if(responseTruncated)throw new Error('minutes_response_too_large');
     if(!res.ok)throw new Error('minutes_provider_failed');
     const data=JSON.parse(responseBody);
     const legacySuccess=data && data.state===undefined && typeof data.runId==='string' && data.runId.length>0 && typeof data.sessionId==='string' && data.sessionId.length>0 && Number.isSafeInteger(data.numTurns) && data.numTurns>0;
@@ -50,13 +73,17 @@ export function createRuntimeMinutes(host,runtimeKey,{maxPoints=DEFAULT_BATCH_MA
     const parsed=parseMinutesJson(data.text);
     valid=validateMinutes(locateModelEvidence(parsed,part),part,false,null);
    }catch(error){
-    if(!signal?.aborted)onFailure?.({
-     event:'minutes_runtime_failure',
-     transcriptVersion:part.versionId,
-     error:error instanceof Error ? error.message : String(error),
-     request:{method:'POST',path,body:requestBody},
-     response:status===null ? null : {status,body:responseBody},
-    });
+    if(!signal?.aborted&&onFailure){
+     const bytes=Buffer.from(requestBody);
+     const requestTruncated=bytes.length>MAX_RUNTIME_BODY_BYTES;
+     onFailure({
+      event:'minutes_runtime_failure',
+      transcriptVersion:part.versionId,
+      error:error instanceof Error ? error.message : String(error),
+      request:{method:'POST',path,body:requestTruncated?new TextDecoder().decode(bytes.subarray(0,MAX_RUNTIME_BODY_BYTES),{stream:true}):requestBody,...(requestTruncated&&{truncated:true})},
+      response:status===null ? null : {status,body:responseBody,...(responseTruncated&&{truncated:true})},
+     });
+    }
     throw error;
    }
    if(signal?.aborted)throw signal.reason;

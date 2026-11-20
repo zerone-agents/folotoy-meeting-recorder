@@ -159,11 +159,20 @@ export class MeetingStore {
   // Use the same storage lifecycle as batch checkpoints. This key cannot match a batch hash.
   saveMinutesFailure(lease,version,record) {
     if(lease.stage!=='minutes_running')return false;
+    let data=JSON.stringify(record);
+    if(Buffer.byteLength(data)>4*1024*1024){
+      data=JSON.stringify({
+        event:'minutes_runtime_failure',
+        error:'diagnostic_too_large',
+        response:record.response ? {status:record.response.status,truncated:true} : null,
+        truncated:true,
+      });
+    }
     return this.db.prepare(`INSERT OR REPLACE INTO minutes_batches(meeting_id,transcript_version,batch_key,data)
       SELECT id,?,'runtime_failure',? FROM meetings
       WHERE id=? AND state='minutes_running' AND generation=? AND lease_token=?
         AND lease_until>CAST(strftime('%s','now') AS INTEGER)`)
-      .run(version,JSON.stringify(record),lease.id,lease.generation,lease.token).changes===1;
+      .run(version,data,lease.id,lease.generation,lease.token).changes===1;
   }
   adminMinutesFailure(id) {
     this.adminGet(id);
