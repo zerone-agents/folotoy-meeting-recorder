@@ -17,7 +17,7 @@ export async function processOne(store,id,stage,{asr,minutes,leaseSeconds=90,act
    const transcript=Array.isArray(text)?segmentTimedTranscript(text,randomUUID()):segmentTranscript(text,randomUUID());transcript.durationSeconds=durationSeconds;transcript.recordedAt=job.recorded_at;transcript.timeTrust=job.time_trust;
    if(!lost)store.publish(lease,JSON.stringify(transcript));
   }else{
-   const transcript={...JSON.parse(job.transcript),recordedAt:job.recorded_at,timeTrust:job.time_trust};const raw=await call(()=>minutes(transcript,{signal:abort.signal,checkpoint:{get:key=>store.batchGet(lease,transcript.versionId,key),put:(key,data)=>store.batchPut(lease,transcript.versionId,key,data)}}));
+   const transcript={...JSON.parse(job.transcript),recordedAt:job.recorded_at,timeTrust:job.time_trust};const raw=await call(()=>minutes(transcript,{signal:abort.signal,onFailure:record=>store.saveMinutesFailure(lease,transcript.versionId,record),checkpoint:{get:key=>store.batchGet(lease,transcript.versionId,key),put:(key,data)=>store.batchPut(lease,transcript.versionId,key,data)}}));
    const out=validateMinutes(raw,transcript,job.reason!=='user',job.reason);
    if(!lost)store.publish(lease,JSON.stringify(out));
   }

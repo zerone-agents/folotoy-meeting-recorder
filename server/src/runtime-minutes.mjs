@@ -28,7 +28,7 @@ export function parseMinutesJson(text){
 
 /** Each batch is validated against its own original segments before combining. */
 export function createRuntimeMinutes(host,runtimeKey,{maxPoints=DEFAULT_BATCH_MAX_POINTS,cacheScope='step-3.7-flash:prompt-v1'}={}){
- return async (transcript,{signal,checkpoint}={})=>{
+ return async (transcript,{signal,checkpoint,onFailure}={})=>{
   const results=[];
   for(const part of transcriptBatches(transcript,maxPoints)) {
    if(signal?.aborted)throw signal.reason;
@@ -50,13 +50,13 @@ export function createRuntimeMinutes(host,runtimeKey,{maxPoints=DEFAULT_BATCH_MA
     const parsed=parseMinutesJson(data.text);
     valid=validateMinutes(locateModelEvidence(parsed,part),part,false,null);
    }catch(error){
-    console.error(JSON.stringify({
+    if(!signal?.aborted)onFailure?.({
      event:'minutes_runtime_failure',
      transcriptVersion:part.versionId,
      error:error instanceof Error ? error.message : String(error),
      request:{method:'POST',path,body:requestBody},
      response:status===null ? null : {status,body:responseBody},
-    }));
+    });
     throw error;
    }
    if(signal?.aborted)throw signal.reason;

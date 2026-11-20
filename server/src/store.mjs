@@ -156,6 +156,20 @@ export class MeetingStore {
   audio(lease) { return this.tx(()=>{const m=this.db.prepare("SELECT chunks,bytes,digest FROM meetings WHERE id=? AND state=? AND generation=? AND lease_token=? AND lease_until>CAST(strftime('%s','now') AS INTEGER)").get(lease.id,lease.stage,lease.generation,lease.token);if(!m)fail('stale_lease');const audio=this.checkedAudio(lease.id,m);if(!this.db.prepare("SELECT 1 FROM meetings WHERE id=? AND state=? AND generation=? AND lease_token=? AND lease_until>CAST(strftime('%s','now') AS INTEGER)").get(lease.id,lease.stage,lease.generation,lease.token))fail('stale_lease');return audio;}); }
   renew(lease, ttlSeconds=60) { if(!Number.isInteger(ttlSeconds)||ttlSeconds<1) fail('invalid'); const r=this.db.prepare("UPDATE meetings SET lease_until=CAST(strftime('%s','now') AS INTEGER)+? WHERE id=? AND state=? AND generation=? AND lease_token=? AND lease_until>CAST(strftime('%s','now') AS INTEGER)").run(ttlSeconds,lease.id,lease.stage,lease.generation,lease.token); return r.changes===1; }
   claim(id,stage,ttlSeconds=60) { if(!['queued','minutes_queued'].includes(stage)||!Number.isInteger(ttlSeconds)||ttlSeconds<1) fail('invalid'); return this.tx(()=>{const m=this.db.prepare('SELECT * FROM meetings WHERE id=?').get(id); const running=stage==='queued'?'asr_running':'minutes_running'; const now=this.db.prepare("SELECT CAST(strftime('%s','now') AS INTEGER) AS t").get().t; if(!m || !(m.state===stage && m.retry_at<=now || (m.state===running && m.lease_until<=now))) return null; if(m.state===running)this.closeAttempt({id,generation:m.generation},'lease_expired');if(m.attempts>=3){this.db.prepare("UPDATE meetings SET state='failed',failed_stage=?,last_error='attempt_limit',lease_token=NULL,lease_until=NULL WHERE id=?").run(stage,id);return null} const token=randomBytes(24).toString('hex');const generation=m.generation+1; this.db.prepare('UPDATE meetings SET state=?,generation=?,lease_token=?,lease_until=?,attempts=attempts+1 WHERE id=?').run(running,generation,token,now+ttlSeconds,id);this.db.prepare('INSERT INTO processing_attempts(meeting_id,generation,stage,started_at) VALUES(?,?,?,?)').run(id,generation,running,now); return {id,stage:running,generation,token}; }); }
+  // Use the same storage lifecycle as batch checkpoints. This key cannot match a batch hash.
+  saveMinutesFailure(lease,version,record) {
+    if(lease.stage!=='minutes_running')return false;
+    return this.db.prepare(`INSERT OR REPLACE INTO minutes_batches(meeting_id,transcript_version,batch_key,data)
+      SELECT id,?,'runtime_failure',? FROM meetings
+      WHERE id=? AND state='minutes_running' AND generation=? AND lease_token=?
+        AND lease_until>CAST(strftime('%s','now') AS INTEGER)`)
+      .run(version,JSON.stringify(record),lease.id,lease.generation,lease.token).changes===1;
+  }
+  adminMinutesFailure(id) {
+    this.adminGet(id);
+    const row=this.db.prepare("SELECT data FROM minutes_batches WHERE meeting_id=? AND batch_key='runtime_failure'").get(id);
+    return row ? JSON.parse(row.data) : null;
+  }
   batchGet(lease,version,key) { const m=this.job(lease);if(lease.stage!=='minutes_running'||JSON.parse(m.transcript).versionId!==version||!/^[a-f0-9]{64}$/.test(key))fail('stale_lease');return this.db.prepare('SELECT data FROM minutes_batches WHERE meeting_id=? AND transcript_version=? AND batch_key=?').get(lease.id,version,key)?.data??null; }
   batchPut(lease,version,key,data) { if(typeof data!=='string'||data.length>1000000)fail('invalid');return this.tx(()=>{const m=this.job(lease);if(lease.stage!=='minutes_running'||JSON.parse(m.transcript).versionId!==version||!/^[a-f0-9]{64}$/.test(key))fail('stale_lease');this.db.prepare('INSERT OR REPLACE INTO minutes_batches(meeting_id,transcript_version,batch_key,data) VALUES(?,?,?,?)').run(lease.id,version,key,data);}); }
   publish(lease,value) {

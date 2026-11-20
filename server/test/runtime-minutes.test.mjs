@@ -42,8 +42,8 @@ test('default minutes batching keeps a 10,628-character transcript in one reques
  a.equal(calls, 1);
 });
 
-test('Runtime diagnostics log complete failed exchanges without request credentials', async (testContext) => {
- const log = testContext.mock.method(console, 'error', () => {});
+test('Runtime diagnostics log complete failed exchanges without request credentials', async () => {
+ const diagnostics = [];
  const rawResponse = JSON.stringify({
   state: 'completed',
   text: JSON.stringify({
@@ -57,12 +57,23 @@ test('Runtime diagnostics log complete failed exchanges without request credenti
   return new Response(rawResponse);
  }}};
  const credential = 'test-runtime-secret';
- await a.rejects(createRuntimeMinutes(host, credential)(t), /invalid_evidence_version/);
- a.equal(log.mock.callCount(), 1);
- const [line] = log.mock.calls[0].arguments;
- const entry = JSON.parse(line);
+ await a.rejects(createRuntimeMinutes(host, credential)(t, {onFailure: entry => diagnostics.push(entry)}), /invalid_evidence_version/);
+ a.equal(diagnostics.length, 1);
+ const [entry] = diagnostics;
  a.equal(entry.request.body, requestBody);
  a.deepEqual(entry.response, {status: 200, body: rawResponse});
  a.equal(entry.error, 'invalid_evidence_version');
- a.equal(line.includes(credential), false);
+ a.equal(JSON.stringify(entry).includes(credential), false);
+});
+
+test('an aborted Runtime request does not capture meeting content', async () => {
+ const controller = new AbortController();
+ const host = {app: {request: async () => {
+  controller.abort(new Error('meeting_deleted'));
+  throw controller.signal.reason;
+ }}};
+ await a.rejects(createRuntimeMinutes(host, 'key')(t, {
+  signal: controller.signal,
+  onFailure: () => a.fail('cancelled meeting content must not be captured'),
+ }), /meeting_deleted/);
 });
