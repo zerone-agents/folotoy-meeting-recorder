@@ -28,10 +28,11 @@ function bindTimestamps(final,deltas,durationSeconds){
     while(offset<text.length){
       const span=spans[deltaIndex];
       const count=Math.min(span.text.length-deltaOffset,text.length-offset);
-      if(span.valid){
+      // The provider only locates the whole delta on the recording timeline.
+      if(span.valid&&count===span.text.length){
         first??=span.start;
         last=Math.max(last??span.end,span.end);
-      }else if(/[^\s\p{P}]/u.test(text.slice(offset,offset+count))){
+      }else if(span.valid||/[^\s\p{P}]/u.test(text.slice(offset,offset+count))){
         missing=true;
       }
       offset+=count;

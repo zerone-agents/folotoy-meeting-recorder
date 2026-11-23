@@ -86,3 +86,42 @@ test('uses audio pauses even without sentence punctuation and accepts shared non
   ['开场介绍',0.96,1.2],['中途议题',899.92,904.4],['结尾。',1769.92,1774.08],
  ]);
 });
+
+test('withholds timestamps from sentences that share one provider delta', async () => {
+ const events = [
+  {type:'transcript.text.delta',delta:'前文。',start_time:0,end_time:450},
+  {type:'transcript.text.delta',delta:'第一句。第二句。第三',start_time:450,end_time:2400},
+  {type:'transcript.text.delta',delta:'句。',start_time:2400,end_time:2800},
+  {type:'transcript.text.delta',delta:'尾声。',start_time:2800,end_time:3500},
+  {type:'transcript.text.done',text:'前文。第一句。第二句。第三句。尾声。'},
+ ];
+ const result = await transcribe(Buffer.from('audio'), {
+  apiKey:'test',withTimestamps:true,durationSeconds:4,
+  fetchImpl:fake(events.map(event=>`data: ${JSON.stringify(event)}\n\n`)),
+ });
+ a.deepEqual(result, [
+  {text:'前文。',startSeconds:0,endSeconds:0.45,timeSource:'asr_sse'},
+  {text:'第一句。'},
+  {text:'第二句。'},
+  {text:'第三句。'},
+  {text:'尾声。',startSeconds:2.8,endSeconds:3.5,timeSource:'asr_sse'},
+ ]);
+});
+
+test('withholds timestamps from both parts of a delta that crosses the length limit', async () => {
+ const longDelta = '字'.repeat(201)+'。';
+ const events = [
+  {type:'transcript.text.delta',delta:longDelta,start_time:0,end_time:12000},
+  {type:'transcript.text.delta',delta:'结尾。',start_time:12000,end_time:13000},
+  {type:'transcript.text.done',text:longDelta+'结尾。'},
+ ];
+ const result = await transcribe(Buffer.from('audio'), {
+  apiKey:'test',withTimestamps:true,durationSeconds:13,
+  fetchImpl:fake(events.map(event=>`data: ${JSON.stringify(event)}\n\n`)),
+ });
+ a.deepEqual(result, [
+  {text:'字'.repeat(200)},
+  {text:'字。'},
+  {text:'结尾。',startSeconds:12,endSeconds:13,timeSource:'asr_sse'},
+ ]);
+});
