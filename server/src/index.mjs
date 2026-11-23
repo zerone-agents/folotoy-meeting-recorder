@@ -50,7 +50,7 @@ const shutdown=new AbortController();
 const meetingPublicBaseUrl=process.env.MEETING_PUBLIC_BASE_URL??null;
 host.app.route('/meeting-service',createMeetingRouter(store,{adminToken:admin,adminId:process.env.MEETING_ADMIN_ID??'local-admin',retentionSeconds,workerConcurrency,timeKeys,publicBaseUrl:meetingPublicBaseUrl,onDelete:id=>activeWork.get(id)?.abort(),getAsrProgress:id=>asrProgress.get(id)??null}));
 await host.start();
-const adapters={activeWork,asrProgress,shutdownSignal:shutdown.signal,asr:(audio,{signal,onDelta})=>transcribe(audio,{apiKey:asrApiKey,baseURL:process.env.MEETING_ASR_BASE_URL,model:process.env.MEETING_ASR_MODEL,signal,onDelta}),minutes:createRuntimeMinutes(host,runtimeKey,{cacheScope:`${minutesProvider.baseURL}:${minutesProvider.model}:prompt-v1`})};
+const adapters={activeWork,asrProgress,shutdownSignal:shutdown.signal,asr:(audio,{signal,onDelta,durationSeconds})=>transcribe(audio,{withTimestamps:true,durationSeconds,apiKey:asrApiKey,baseURL:process.env.MEETING_ASR_BASE_URL,model:process.env.MEETING_ASR_MODEL,signal,onDelta}),minutes:createRuntimeMinutes(host,runtimeKey,{cacheScope:`${minutesProvider.baseURL}:${minutesProvider.model}:prompt-v1`})};
 let stopping=false;
 const publicFetch=createPublicFetch(host.app.fetch,{isStopping:()=>stopping});
 let server;
