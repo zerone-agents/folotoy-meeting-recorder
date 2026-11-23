@@ -1,6 +1,7 @@
 FROM node:22.13.0-bookworm-slim AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
+COPY scripts/patch-agent-sdk.mjs ./scripts/
 RUN npm ci --omit=dev
 
 FROM node:22.13.0-bookworm-slim

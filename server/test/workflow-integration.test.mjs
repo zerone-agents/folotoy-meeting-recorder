@@ -1,4 +1,4 @@
-import {sampleOgg} from './fixtures.mjs';
+import {sampleOgg,sampleChatCompletionStream} from './fixtures.mjs';
 import {test} from 'node:test';
 import {strict as assert} from 'node:assert';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -20,7 +20,7 @@ test('complete upload survives restart and runs through real runtime with fixtur
  const minutesProvider={apiKey:'minutes-fixture',baseURL:'https://minutes.fixture.invalid/custom/v1',model:'custom-minutes'};
  let host,store;const calls=[];
  globalThis.fetch=async(url,options)=>{const u=String(url);calls.push(u);if(u.endsWith('/audio/asr/sse')){assert.equal(new Headers(options.headers).get('authorization'),`Bearer ${asrApiKey}`);const body=JSON.parse(options.body);assert.equal(body.audio.input.transcription.model,'stepaudio-2.5-asr');assert.equal(body.audio.input.transcription.enable_timestamp,true);assert.deepEqual(Buffer.from(body.audio.data,'base64'),audio);return new Response('data: {"type":"transcript.text.delta","delta":"测试会议","start_time":0,"end_time":20}\n\ndata: {"type":"transcript.text.done","text":"测试会议"}\n\n',{headers:{'content-type':'text/event-stream'}})}
-  assert.equal(u,`${minutesProvider.baseURL}/chat/completions`);assert.equal(new Headers(options.headers).get('authorization'),`Bearer ${minutesProvider.apiKey}`);const body=JSON.parse(options.body);assert.equal(body.model,minutesProvider.model);assert.ok(!body.tools||body.tools.length===0);return Response.json({id:'fixture',object:'chat.completion',created:1,model:body.model,choices:[{index:0,message:{role:'assistant',content:JSON.stringify({summary:'测试会议',discussion:[],decisions:[],actions:[],openQuestions:[]})},finish_reason:'stop'}],usage:{prompt_tokens:1,completion_tokens:1,total_tokens:2}})};
+  assert.equal(u,`${minutesProvider.baseURL}/chat/completions`);assert.equal(new Headers(options.headers).get('authorization'),`Bearer ${minutesProvider.apiKey}`);const body=JSON.parse(options.body);assert.equal(body.model,minutesProvider.model);assert.ok(!body.tools||body.tools.length===0);return sampleChatCompletionStream(JSON.stringify({summary:'测试会议',discussion:[],decisions:[],actions:[],openQuestions:[]}))};
  try {
   store=new MeetingStore(path);store.registerDevice('device',token);let app=createMeetingRouter(store,{adminToken:admin});const request=(path,key,options={})=>app.request(path,{...options,headers:{authorization:`Bearer ${key}`,...options.headers}});
   assert.equal((await request('/meetings/m',token,{method:'POST'})).status,201);assert.equal((await request('/meetings/m/chunks/0',token,{method:'PUT',body:audio,headers:{'x-content-sha256':hash}})).status,201);
