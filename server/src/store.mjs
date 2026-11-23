@@ -2,6 +2,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {tombstoneMetadataClean} from './tombstone.mjs';
 import {renderMinutesMarkdown,containsReviewNotices} from './markdown-minutes.mjs';
+import {formatTranscript} from './transcript-format.mjs';
 import {validateShareSchema} from './share-schema.mjs';
 import {initializeSubscriptions,queueSubscriptionDeliveries} from './subscriptions.mjs';
 
@@ -87,7 +88,7 @@ export class MeetingStore {
   createShare(id,includeTranscript,days,now=Math.floor(Date.now()/1000),allowDownload=false) {
     return this.tx(()=>this.createShareInTransaction(id,includeTranscript,days,now,allowDownload));
   }
-  readShare(token,now=Math.floor(Date.now()/1000)) {
+  readShare(token,now=Math.floor(Date.now()/1000),{timedTranscript=false}={}) {
     if(typeof token!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(token)||!Number.isSafeInteger(now))return null;
     this.db.exec('BEGIN');try{
       const m=this.db.prepare("SELECT s.include_transcript,s.allow_download,m.id,m.state,m.reason,m.minutes,m.transcript FROM meeting_shares s JOIN meetings m ON m.id=s.meeting_id WHERE s.token_hash=? AND s.expires_at>? AND m.state NOT IN ('deleting','deleted','cancelled')").get(hash(token),now);
@@ -100,7 +101,7 @@ export class MeetingStore {
       const editMatches=Boolean(edit&&edit.source_hash===hash(m.minutes)&&edit.source_version===transcript.versionId);
       const reviewKey=this.reviewSnapshot(m,edit),reviewed=Boolean(reviewKey&&this.db.prepare('SELECT 1 FROM meeting_reviews WHERE meeting_id=? AND review_key=?').get(m.id,reviewKey));
       const result={reviewed,allowDownload:Boolean(m.allow_download),minutesMarkdown:editMatches?edit.markdown:renderMinutesMarkdown(minutes,{captureReason:m.reason,includeReviewNotice:false}),minutesEditedStale:Boolean(edit&&!editMatches),containsReviewNotice:Boolean(editMatches&&containsReviewNotices(edit.markdown)),incomplete:['limit','storage','interrupted'].includes(m.reason)||Boolean(minutes.incomplete)};
-      if(m.include_transcript)result.transcript=transcript.segments.map(s=>s.text).join('');
+      if(m.include_transcript)result.transcript=timedTranscript?formatTranscript(transcript):transcript.segments.map(s=>s.text).join('');
       this.db.exec('COMMIT');return result;
     }catch(e){this.db.exec('ROLLBACK');throw e}
   }

@@ -7,11 +7,11 @@ import { createMeetingRouter } from '../src/routes.mjs';
 
 const completedAt = (store, id) => store.db.prepare('SELECT completed_at AS completedAt FROM meetings WHERE id=?').get(id).completedAt;
 
-function completedMeeting(store, id = 'm', title = null) {
+function completedMeeting(store, id = 'm', title = null, segments = [{ id: 's0', text: 'private transcript' }]) {
   const audio = Buffer.from(`audio-${id}`), digest = createHash('sha256').update(audio).digest('hex');
   store.create('d', id);store.put('d', id, 0, audio, digest);
   store.finalize('d', id, { count: 1, bytes: audio.length, digest, reason: 'user' });
-  store.publish(store.claim(id, 'queued'), JSON.stringify({ versionId: `v-${id}`, segments: [{ id: 's0', text: 'private transcript' }] }));
+  store.publish(store.claim(id, 'queued'), JSON.stringify({ versionId: `v-${id}`, segments }));
   store.publish(store.claim(id, 'minutes_queued'), JSON.stringify({ summary: 'completed minutes', ...(title === null ? {} : { meeting: { topic: title } }) }));
 }
 
@@ -129,11 +129,14 @@ test('administrator configures shares at approval and updates them for future de
     assert.equal(approved.status, 200);assert.deepEqual(await approved.json(), { id, status: 'approved', days: 30, includeTranscript: true, allowDownload: true });
     const updated = await app.request(`/admin/subscriptions/${id}`, { method: 'PATCH', headers: auth, body: JSON.stringify({ days: 14 }) });
     assert.deepEqual(await updated.json(), { id, status: 'approved', days: 14, includeTranscript: true, allowDownload: true });
-    completedMeeting(store);
+    completedMeeting(store, 'm', null, [
+      { id: 's0', text: '  private  transcript ', startSeconds: 1, endSeconds: 3.5, timeSource: 'asr_sse' },
+      { id: 's1', text: ' untimed\ttext  ' },
+    ]);
     let event;
     await drainSubscriptions(store, { baseUrl: 'https://example.com/meeting-service', fetchImpl: async (_url, options) => { event = JSON.parse(options.body); return new Response(null, { status: 200 }); } });
     const token = event.shareUrl.split('#')[1], shared = store.readShare(token);
-    assert.equal(shared.transcript, 'private transcript');assert.equal(shared.allowDownload, true);
+    assert.equal(shared.transcript, '  private  transcript  untimed\ttext  ');assert.equal(shared.allowDownload, true);
     assert.deepEqual(event.downloadUrls, {
       minutes: 'https://example.com/meeting-service/share/download/minutes',
       transcript: 'https://example.com/meeting-service/share/download/transcript'
@@ -141,6 +144,7 @@ test('administrator configures shares at approval and updates them for future de
     for (const kind of ['minutes', 'transcript']) {
       const downloaded = await app.request(event.downloadUrls[kind].replace('https://example.com/meeting-service', ''), { headers: { authorization: `Bearer ${token}` } });
       assert.equal(downloaded.status, 200);
+      if (kind === 'transcript') assert.equal(await downloaded.text(), '[00:01 – 00:03 · 2.5s]\n  private  transcript \n\n[时间戳不可用]\n untimed\ttext  ');
     }
     assert.ok(event.shareExpiresAt > Math.floor(Date.now() / 1000) + 13 * 86400);
     assert.ok(event.shareExpiresAt < Math.floor(Date.now() / 1000) + 15 * 86400);
