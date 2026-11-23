@@ -32,7 +32,17 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  app.get('/share',()=>shareUi());
  app.get('/share/data',c=>{c.header('Referrer-Policy','no-referrer');c.header('X-Content-Type-Options','nosniff');const match=/^Bearer ([A-Za-z0-9_-]{43})$/.exec(c.req.header('authorization')??'');const data=match?store.readShare(match[1]):null;return data?c.json(data.unavailable?data:{...data,minutesHtml:renderPreview(data.minutesMarkdown)}):c.json({error:'not_found'},404)});
  app.get('/favicon.svg',()=>meetingIcon());
- for(const kind of ['minutes','transcript'])app.get('/share/download/'+kind,c=>{c.header('Referrer-Policy','no-referrer');c.header('X-Content-Type-Options','nosniff');const match=/^Bearer ([A-Za-z0-9_-]{43})$/.exec(c.req.header('authorization')??'');const data=match?store.readShare(match[1]):null;if(!data||data.unavailable||!data.allowDownload||(kind==='transcript'&&typeof data.transcript!=='string'))return c.json({error:'not_found'},404);c.header('Content-Disposition',kind==='minutes'?'attachment; filename=meeting-minutes.md':'attachment; filename=meeting-transcript.txt');return c.body(kind==='minutes'?minutesForDownload(data.minutesMarkdown,data.reviewed):data.transcript,200,{'Content-Type':kind==='minutes'?'text/markdown; charset=utf-8':'text/plain; charset=utf-8'})});
+ for(const kind of ['minutes','transcript'])app.get('/share/download/'+kind,c=>{
+  c.header('Referrer-Policy','no-referrer');
+  c.header('X-Content-Type-Options','nosniff');
+  const match=/^Bearer ([A-Za-z0-9_-]{43})$/.exec(c.req.header('authorization')??'');
+  const isTranscript=kind==='transcript';
+  const data=match?store.readShare(match[1],undefined,{timedTranscript:isTranscript}):null;
+  if(!data||data.unavailable||!data.allowDownload||(isTranscript&&typeof data.transcript!=='string'))return c.json({error:'not_found'},404);
+  const body=isTranscript?data.transcript:minutesForDownload(data.minutesMarkdown,data.reviewed);
+  c.header('Content-Disposition',isTranscript?'attachment; filename=meeting-transcript.txt':'attachment; filename=meeting-minutes.md');
+  return c.body(body,200,{'Content-Type':isTranscript?'text/plain; charset=utf-8':'text/markdown; charset=utf-8'});
+ });
  app.use('*',async(c,next)=>{c.header('Cache-Control','no-store');c.header('X-Content-Type-Options','nosniff');await next()});
  /* Optional signed-time bootstrap: no bearer token is sent on this path.
   * Authenticity comes from the device-pinned key and fresh nonce, not HTTP. */
