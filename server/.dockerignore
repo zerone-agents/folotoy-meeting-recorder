@@ -1,5 +1,7 @@
 **
 !package.json
 !package-lock.json
+!scripts/
+!scripts/patch-agent-sdk.mjs
 !src/
 !src/**

@@ -6,9 +6,11 @@ export function sampleChatCompletionStream(text,{finishReason='stop',outputToken
  const events=[
   {choices:[{index:0,delta:{content:text.slice(0,middle)},finish_reason:null}]},
   {choices:[{index:0,delta:{content:text.slice(middle)},finish_reason:null}]},
+ ];
+ if(finishReason!==null)events.push(
   {choices:[{index:0,delta:{},finish_reason:finishReason}]},
   {choices:[],usage:{prompt_tokens:1,completion_tokens:outputTokens,total_tokens:1+outputTokens}},
- ];
- const body=events.map(event=>`data: ${JSON.stringify(event)}\n\n`).join('')+'data: [DONE]\n\n';
+ );
+ const body=events.map(event=>`data: ${JSON.stringify(event)}\n\n`).join('')+(finishReason===null?'':'data: [DONE]\n\n');
  return new Response(body,{headers:{'content-type':'text/event-stream'}});
 }

@@ -9,21 +9,42 @@ import {registerMinutesAgent} from '../src/register-agent.mjs';
 import {createRuntimeMinutes} from '../src/runtime-minutes.mjs';
 
 test('real runtime invokes OpenAI-compatible provider and returns validated JSON transport',async()=>{
- const oldFetch=globalThis.fetch,oldKey=process.env.ZERONE_AGENT_HTTP_API_KEY;const dir=mkdtempSync(join(tmpdir(),'meeting-runtime-'));const key='k'.repeat(40);process.env.ZERONE_AGENT_HTTP_API_KEY=key;let upstreamRequest,finishReason='stop';
+ const oldFetch=globalThis.fetch,oldKey=process.env.ZERONE_AGENT_HTTP_API_KEY;const dir=mkdtempSync(join(tmpdir(),'meeting-runtime-'));const key='k'.repeat(40);process.env.ZERONE_AGENT_HTTP_API_KEY=key;let upstreamRequest,finishReason='stop',malformed=false;
  globalThis.fetch=async(url,options)=>{
   assert.match(String(url),/\/chat\/completions$/);
   upstreamRequest=JSON.parse(options.body);
   assert.equal(upstreamRequest.model,'step-3.7-flash');
   assert.ok(!upstreamRequest.tools||upstreamRequest.tools.length===0);
-  const text=finishReason==='length'
+  const text=malformed
    ? '{"summary":"未完成'
    : JSON.stringify({summary:'测试',discussion:[],decisions:[],actions:[],openQuestions:[]});
-  return sampleChatCompletionStream(text,{finishReason,outputTokens:finishReason==='length'?65_536:20_000});
+  return sampleChatCompletionStream(text,{finishReason,outputTokens:20_000});
  };
 
  let host;try{
   host=await createRuntime({server:{host:'127.0.0.1',port:0},agents:[{id:'minutes',description:'test',model:'step-3.7-flash',apiType:'openai-completions',baseURL:'https://invalid.test/v1',apiKey:'fixture',allowedTools:[],maxTurns:2,systemPrompt:'Return JSON'}]}, {configDir:dir});registerMinutesAgent(host,{apiKey:'fixture',baseURL:'https://invalid.test/v1'});await host.start();
-  const original=host.app.request.bind(host.app);host.app.request=async(...args)=>{const r=await original(...args);if(!r.ok)console.error('runtime fixture response',r.status,await r.clone().text());return r};const run=createRuntimeMinutes(host,key);const out=await run({versionId:'v1',segments:[{id:'s0',text:'测试'}]});assert.equal(out.summary,'测试');assert.equal(upstreamRequest.max_tokens,65_536);assert.equal(upstreamRequest.stream,true);finishReason='length';await assert.rejects(()=>run({versionId:'v2',segments:[{id:'s0',text:'测试'}]}),/minutes_invalid_json/);
+  const run=createRuntimeMinutes(host,key);
+  const transcript={versionId:'v1',segments:[{id:'s0',text:'测试'}]};
+  const out=await run(transcript);
+  assert.equal(out.summary,'测试');
+  assert.equal(upstreamRequest.max_tokens,65_536);
+  assert.equal(upstreamRequest.stream,true);
+
+  const failures=[];
+  finishReason='length';
+  malformed=true;
+  await assert.rejects(()=>run(transcript,{onFailure:details=>failures.push(details)}),/minutes_provider_failed/);
+  malformed=false;
+  await assert.rejects(()=>run(transcript,{onFailure:details=>failures.push(details)}),/minutes_provider_failed/);
+  finishReason=null;
+  await assert.rejects(()=>run(transcript,{onFailure:details=>failures.push(details)}),/minutes_provider_failed/);
+  assert.equal(failures.length,3);
+  for(const failure of failures){
+   assert.equal(failure.response.status,502);
+   assert.equal(JSON.parse(failure.response.body).errorType,'error_incomplete_stream');
+  }
+  assert.equal(JSON.parse(JSON.parse(failures[1].response.body).text).summary,'测试');
+  assert.equal(JSON.parse(JSON.parse(failures[2].response.body).text).summary,'测试');
  }finally{if(host)await host.stop();globalThis.fetch=oldFetch;if(oldKey===undefined)delete process.env.ZERONE_AGENT_HTTP_API_KEY;else process.env.ZERONE_AGENT_HTTP_API_KEY=oldKey;rmSync(dir,{recursive:true,force:true})}
 });
 test('concurrent runtime sessions keep meeting inputs and results isolated',{timeout:5000},async()=>{

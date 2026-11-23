@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Meeting recorder service",
   "scripts": {
+    "postinstall": "node scripts/patch-agent-sdk.mjs",
     "test": "node --test test/*.test.mjs",
     "start": "node src/index.mjs"
   },
