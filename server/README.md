@@ -21,7 +21,7 @@
 
 转录可通过 `MEETING_ASR_BASE_URL` 和 `MEETING_ASR_MODEL` 配置，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `stepaudio-2.5-asr`。Base URL 填到 API 版本，服务会追加 `/audio/asr/sse`。API 密钥通过 `MEETING_ASR_API_KEY` 注入。服务收到该接口的完整结束事件后生成逐字稿，再处理纪要。服务向 Step Plan SSE 请求音频时间戳，并用与最终文本一致的增量偏移给段落标记起止时间。缺少有效音频偏移，或分段边界落在同一个增量内部时，保留完整文本，对应段落显示「时间戳不可用」。已有转录的时间戳继续用于查看和下载。
 
-开发版接口见 [API.md](API.md)。纪要生成使用 `MEETING_MINUTES_BASE_URL` 和 `MEETING_MINUTES_MODEL`，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `step-3.7-flash`。Base URL 填到 API 版本，Runtime 与纪要适配器共用这组配置，密钥通过 `MEETING_MINUTES_API_KEY` 注入。逐字稿正文默认每批最多 200,000 个 Unicode 字符，超过时按原始片段分批，逐批核验原文引用并拼接结果；它不会自动消除跨批重复或推断跨批上下文，质量仍需真实会议评估。
+开发版接口见 [API.md](API.md)。纪要生成使用 `MEETING_MINUTES_BASE_URL` 和 `MEETING_MINUTES_MODEL`，默认分别为 `https://api.stepfun.com/step_plan/v1` 和 `step-3.7-flash`。Base URL 填到 API 版本，Runtime 与纪要适配器共用这组配置，密钥通过 `MEETING_MINUTES_API_KEY` 注入。纪要 Agent 通过流式 Chat Completions 向模型发送 `max_tokens: 65536`，由 Runtime 汇集后返回 JSON。逐字稿正文默认每批最多 200,000 个 Unicode 字符，超过时按原始片段分批，逐批核验原文引用并拼接结果；它不会自动消除跨批重复或推断跨批上下文，质量仍需真实会议评估。
 
 离线恢复工具及其前提见 [BACKUP.md](BACKUP.md)。必须保留恢复切换前最新的安全状态，不能在运行中直接替换 SQLite 数据库。
 
