@@ -40,7 +40,7 @@ static atomic_bool s_capture_fault;
 static atomic_bool s_quiescent=true;
 static atomic_bool s_codec_prepared;
 static atomic_bool s_codec_needs_reset;
-static volatile uint8_t s_level;
+static atomic_uchar s_level;
 static int16_t s_pcm[SC_AUDIO_FRAME_SAMPLES];
 static uint8_t s_pkt[SC_UNIT_DATA];
 
@@ -51,13 +51,30 @@ static uint8_t level_of(const int16_t *pcm, size_t n)
         int v = pcm[i] < 0 ? -pcm[i] : pcm[i];
         if (v > peak) peak = v;
     }
-    // 粗略对数刻度:约 -48 dBFS → 0,0 dBFS → 100。
-    int level = 0;
-    while (peak > 128 && level < 100) {
-        peak >>= 1;
-        level += 12;
+    /* Approximate a -48 dBFS to full-scale peak meter, interpolating within each octave. */
+    int base = 128;
+    int octaves = 0;
+    if (peak <= base) return 0;
+    if (peak >= INT16_MAX) return 100;
+    while (peak >= 2 * base) {
+        base *= 2;
+        octaves++;
     }
-    return (uint8_t)(level > 100 ? 100 : level);
+    return (uint8_t)((octaves * 100 + (peak - base) * 100 / base) / 8);
+}
+
+static uint8_t smooth_level(uint8_t current, uint8_t measured, unsigned *hold_frames)
+{
+    if (measured >= current) {
+        *hold_frames = 120u / SC_AUDIO_FRAME_MS;
+        return measured;
+    }
+    if (*hold_frames > 0) {
+        (*hold_frames)--;
+        return current;
+    }
+    /* Round the release step up so it always reaches the measured level. */
+    return (uint8_t)(current - (current - measured + 3u) / 4u);
 }
 
 static void capture_loop(void)
@@ -65,6 +82,8 @@ static void capture_loop(void)
     opus_encoder_ctl(s_enc, OPUS_RESET_STATE);
     s_running = true;
     uint32_t frames = 0, bytes = 0;
+    uint8_t level = 0;
+    unsigned hold_frames = 0;
     while (s_run) {
         if (bsp_audio_read(s_pcm, sizeof(s_pcm)) != ESP_OK) {
             atomic_store(&s_capture_fault, true);
@@ -75,7 +94,8 @@ static void capture_loop(void)
             vTaskDelay(wait ? wait : 1);
             continue;
         }
-        s_level = level_of(s_pcm, SC_AUDIO_FRAME_SAMPLES);
+        level = smooth_level(level, level_of(s_pcm, SC_AUDIO_FRAME_SAMPLES), &hold_frames);
+        atomic_store_explicit(&s_level, level, memory_order_relaxed);
         int n = opus_encode(s_enc, s_pcm, SC_AUDIO_FRAME_SAMPLES, s_pkt, sizeof(s_pkt));
         if (n < 0) {
             atomic_store(&s_capture_fault, true);
@@ -87,7 +107,7 @@ static void capture_loop(void)
         if (s_cb) s_cb(s_pkt, (uint8_t)n, s_cb_ctx);
     }
     s_running = false;
-    s_level = 0;
+    atomic_store_explicit(&s_level, 0, memory_order_relaxed);
     if (frames) {
         ESP_LOGI(TAG, "采集结束:%lu 帧,平均 %lu B/帧,栈剩余 %u B", (unsigned long)frames,
                  (unsigned long)(bytes / frames), (unsigned)uxTaskGetStackHighWaterMark(NULL));
@@ -259,5 +279,5 @@ bool sc_audio_running(void)
 
 uint8_t sc_audio_level(void)
 {
-    return s_level;
+    return atomic_load_explicit(&s_level, memory_order_relaxed);
 }
