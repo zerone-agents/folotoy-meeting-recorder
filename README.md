@@ -42,6 +42,8 @@ npm test
 
 ### 固件与设备
 
+固件使用独立版本号和 `firmware-v*` 标签。下载、校验与发版入口见[固件发布与下载](docs/firmware-releases.md)。
+
 目标设备是 ESP32-C3、8 MB Flash、无 PSRAM，构建基线为 ESP-IDF 5.5.3。设备编译、配网与写入前先阅读[固件说明](firmware/README.zh_CN.md)、[应用配置和构建说明](firmware/docs/development/engineering/build-and-test.zh_CN.md)及[设备实测记录](research/2026-11-03-agent-commissioning-upload-test.md)。刷写和分区变更可能影响已有数据；首次初始化录音分区及恢复策略见[自动上传设计](docs/superpowers/specs/2026-11-02-scr1-auto-upload-design.md)。
 
 ## 当前状态与限制
