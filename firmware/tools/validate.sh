@@ -544,9 +544,12 @@ run_firmware_checks() (
     validation_build_dir="$(mktemp -d /tmp/ai-passport-firmware.XXXXXX)"
     trap 'rm -rf -- "$validation_build_dir"' EXIT
 
+    configure_args=(-D "SDKCONFIG=${validation_build_dir}/sdkconfig")
+    if [[ -n "${MEETING_FIRMWARE_VERSION:-}" ]]; then
+        configure_args+=(-D "PROJECT_VER=${MEETING_FIRMWARE_VERSION}")
+    fi
     SDKCONFIG_DEFAULTS="${repo_root}/sdkconfig.defaults${MEETING_EXTRA_SDKCONFIG_DEFAULTS:+;$MEETING_EXTRA_SDKCONFIG_DEFAULTS}" \
-        idf.py -B "${validation_build_dir}" \
-        -D "SDKCONFIG=${validation_build_dir}/sdkconfig" build
+        idf.py -B "${validation_build_dir}" "${configure_args[@]}" build
     idf.py -B "${validation_build_dir}" merge-bin \
         -o "${validation_build_dir}/FoloToy-AI-Passport-full.bin"
     python3 tools/verify_firmware.py "${validation_build_dir}"

@@ -1,0 +1,120 @@
+name: Build and release firmware
+
+on:
+  pull_request:
+    paths:
+      - 'firmware/**'
+      - '.github/workflows/firmware-release.yml'
+  push:
+    tags:
+      - 'firmware-v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firmware-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Resolve firmware identity
+        id: identity
+        shell: bash
+        run: |
+          version=0.0.0
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version=${GITHUB_REF_NAME#firmware-v}
+            if [[ ! "$GITHUB_REF_NAME" =~ ^firmware-v(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*)){2}$ || ${#version} -gt 31 ]]; then
+              echo 'Expected a firmware-vMAJOR.MINOR.PATCH tag with a version of at most 31 characters.' >&2
+              exit 1
+            fi
+          fi
+          commit=$(git rev-parse 'HEAD^{commit}')
+          test "$commit" = "$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          printf 'version=%s\ncommit=%s\n' "$version" "$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Build and verify complete firmware
+        uses: espressif/esp-idf-ci-action@9d38657f3d789ca759b2b37aaf5ceffbc42c4f0d # v1
+        env:
+          MEETING_FIRMWARE_VERSION: ${{ steps.identity.outputs.version }}
+        with:
+          path: firmware
+          esp_idf_version: v5.5.3
+          target: esp32c3
+          extra_docker_args: -e MEETING_FIRMWARE_VERSION
+          command: MEETING_EXTRA_SDKCONFIG_DEFAULTS="$PWD/sdkconfig.meeting-upload.defaults" ./tools/validate.sh --firmware
+
+      - name: Package firmware, checksums and source metadata
+        env:
+          VERSION: ${{ steps.identity.outputs.version }}
+          SOURCE_COMMIT: ${{ steps.identity.outputs.commit }}
+        run: |
+          python3 firmware/tools/package_firmware_release.py \
+            --build-dir firmware/build --output-dir firmware-release \
+            --version "$VERSION" --commit "$SOURCE_COMMIT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: meeting-recorder-firmware
+          path: firmware-release/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: meeting-recorder-firmware
+          path: firmware-release
+
+      - name: Publish versioned firmware on GitHub Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SOURCE_COMMIT: ${{ needs.build.outputs.commit }}
+        working-directory: firmware-release
+        shell: bash
+        run: |
+          set -euo pipefail
+          firmware="meeting-recorder-firmware-v${VERSION}-full.bin"
+          checksum=$(sha256sum "$firmware")
+          test "$checksum" = "$(cat SHA256SUMS)"
+          jq -e --arg tag "$GITHUB_REF_NAME" --arg version "$VERSION" --arg commit "$SOURCE_COMMIT" \
+            --arg file "$firmware" --arg sha "${checksum%% *}" \
+            '.tag == $tag and .version == $version and .source_commit == $commit and
+             .artifact.filename == $file and .artifact.sha256 == $sha and .artifact.flash_offset == 0' \
+            firmware-release.json > /dev/null
+
+          remote_commit=$(git ls-remote --exit-code "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$GITHUB_REF" "${GITHUB_REF}^{}" |
+            awk -v ref="$GITHUB_REF" '$2 == ref { tag = $1 } $2 == ref "^{}" { peeled = $1 } END { print (peeled ? peeled : tag) }')
+          if [[ "$remote_commit" != "$SOURCE_COMMIT" ]]; then
+            echo 'The remote tag no longer refers to the built source commit.' >&2
+            exit 1
+          fi
+
+          notes=$(mktemp)
+          cat > "$notes" <<EOF
+          Meeting Recorder firmware **v${VERSION}** built from [${SOURCE_COMMIT}](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${SOURCE_COMMIT}).
+
+          The full image starts at offset \`0x0\`. Back up any recordings and settings you need before installing. This version requires compatible, prepared recording storage.
+
+          See the [firmware release guide](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/${SOURCE_COMMIT}/docs/firmware-releases.md) for download verification and installation details.
+          EOF
+          gh release create "$GITHUB_REF_NAME" "$firmware" SHA256SUMS firmware-release.json \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "Meeting Recorder Firmware v${VERSION}" --notes-file "$notes"
