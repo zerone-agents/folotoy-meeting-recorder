@@ -31,7 +31,46 @@ unsigned uxTaskGetStackHighWaterMark(TaskHandle_t task){(void)task;return 100;}
 SemaphoreHandle_t xSemaphoreCreateBinary(void){sem_created++;return (void *)1;}
 BaseType_t xSemaphoreTake(SemaphoreHandle_t h,unsigned ticks){(void)h;(void)ticks;if(sem_available){sem_available=0;return pdTRUE;}return pdFALSE;}
 BaseType_t xSemaphoreGive(SemaphoreHandle_t h){(void)h;sem_available=1;return pdTRUE;}
+
+static void test_peak_percent(void)
+{
+    const int16_t peaks[] = {0, 128, 384, -512, 2048, -8192, INT16_MAX, INT16_MIN};
+    const uint8_t expected[] = {0, 0, 18, 25, 50, 75, 100, 100};
+    for (size_t i = 0; i < sizeof(expected); i++) {
+        assert(level_of(&peaks[i], 1) == expected[i]);
+    }
+    assert(level_of(peaks, 4) == 25);
+}
+
+static void test_meter_smoothing(void)
+{
+    unsigned hold_frames = 0;
+    uint8_t level = smooth_level(0, 20, &hold_frames);
+    assert(level == 20);
+    for (unsigned i = 0; i < 3; i++) {
+        level = smooth_level(level, 0, &hold_frames);
+        assert(level == 20);
+    }
+    level = smooth_level(level, 50, &hold_frames);
+    assert(level == 50);
+
+    for (unsigned i = 0; i < 6; i++) {
+        level = smooth_level(level, 0, &hold_frames);
+        assert(level == 50);
+    }
+    level = smooth_level(level, 0, &hold_frames);
+    assert(level == 37);
+    for (unsigned i = 0; i < 20; i++) {
+        uint8_t previous = level;
+        level = smooth_level(level, 0, &hold_frames);
+        assert(level < previous || level == 0);
+    }
+    assert(level == 0);
+}
+
 int main(void){
+ test_peak_percent();
+ test_meter_smoothing();
  assert(sc_audio_init(NULL,NULL)==ESP_OK);assert(sleep_count==1);
  /* Boot releases the idle encoder for TLS; recording must recreate it. */
  assert(s_enc&&sc_audio_release_encoder_idle()&&!s_enc&&deleted==1);

@@ -1,6 +1,7 @@
 /* Meeting recorder interface. All LVGL work is in the LVGL timer task. */
 #include "sc_ui.h"
 #include "sc_ui_text.h"
+#include "sc_audio.h"
 #include "sc_core.h"
 #include "sc_proto.h"
 #include "sc_store.h"
@@ -16,12 +17,18 @@ LV_FONT_DECLARE(meeting_font_16);
 #define MUTED 0xAAB6BD
 #define BLUE 0x6AC5D8
 #define ALERT 0xFF866B
+#define RING_TRACK 0x546B78
+#define RING_DIAMETER 152
+#define RING_WIDTH 10
 #define ROWS 6
 static atomic_int page_request;
 static atomic_int selected_index=ATOMIC_VAR_INIT(-1);
 static atomic_uint displayed_selection_id;
 static atomic_bool keep_awake;
 static lv_obj_t *title,*body,*config_wifi_row,*config_wifi_name,*config_ble_row,*config_ble_name,*footer,*network_icon,*wifi_slash,*battery_fill,*battery_unknown;
+static lv_obj_t *recording_panel, *recording_ring, *recording_clock, *recording_state;
+static uint8_t displayed_record_status = UINT8_MAX;
+static uint32_t displayed_record_seconds = UINT32_MAX;
 /* Recording metadata is immutable after creation; avoid reading NVS every
  * 200 ms from the display task. File IDs are never reused. */
 typedef struct { uint32_t id; int64_t epoch; bool known; } display_time;
@@ -49,6 +56,32 @@ static lv_obj_t *make_text(lv_obj_t *parent,const lv_font_t *font,int x,int y,in
     return obj;
 }
 
+static void refresh_recording_level(lv_timer_t *timer)
+{
+    (void)timer;
+    if (displayed_record_status != SC_REC_RECORDING ||
+        lv_obj_has_flag(recording_panel, LV_OBJ_FLAG_HIDDEN)) return;
+
+    lv_arc_set_value(recording_ring, sc_audio_level());
+}
+
+static void refresh_recording_panel(const sc_snapshot_t *snapshot)
+{
+    if (displayed_record_status != snapshot->rec_status) {
+        displayed_record_status = snapshot->rec_status;
+        bool recording = displayed_record_status == SC_REC_RECORDING;
+        bool paused = displayed_record_status == SC_REC_PAUSED;
+        lv_label_set_text(recording_state, recording ? "录音中" : paused ? "已暂停" : "准备录音");
+        lv_obj_set_style_text_color(recording_state, lv_color_hex(paused ? ALERT : MUTED), 0);
+        lv_arc_set_value(recording_ring, recording ? sc_audio_level() : 0);
+    }
+    if (displayed_record_seconds != snapshot->rec_seconds) {
+        displayed_record_seconds = snapshot->rec_seconds;
+        lv_label_set_text_fmt(recording_clock, "%02lu:%02lu", (unsigned long)(displayed_record_seconds / 60),
+                              (unsigned long)(displayed_record_seconds % 60));
+    }
+}
+
 static void refresh(lv_timer_t *timer)
 {
     (void)timer;sc_snapshot_t s;sc_core_snapshot(&s);
@@ -72,13 +105,16 @@ static void refresh(lv_timer_t *timer)
         lv_obj_remove_flag(battery_unknown,LV_OBJ_FLAG_HIDDEN);
     }
     int page=atomic_load(&page_request);
-    if(page!=2||setup||wifi||!s.storage_ready||s.delete_review_busy||
-       s.delete_review.stage!=MEETING_DELETE_UI_IDLE){
+    bool delete_visible = s.delete_review_busy || s.delete_review.stage != MEETING_DELETE_UI_IDLE;
+    bool normal_page = !setup && !wifi && s.storage_ready && !delete_visible;
+    if (normal_page && page == 0) lv_obj_remove_flag(recording_panel, LV_OBJ_FLAG_HIDDEN);
+    else lv_obj_add_flag(recording_panel, LV_OBJ_FLAG_HIDDEN);
+    if(page!=2||!normal_page){
         lv_obj_add_flag(config_wifi_row,LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(config_wifi_name,LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(config_ble_row,LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(config_ble_name,LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(body,95);
+        lv_obj_set_y(body, normal_page && page == 0 ? 237 : 95);
     }
     if(setup){
         if(s.setup.state==MEETING_SETUP_PAIRING){
@@ -109,7 +145,7 @@ static void refresh(lv_timer_t *timer)
         lv_label_set_text(body,"可能有录音。\n\n请使用恢复工具。\n不要格式化存储。");
         lv_label_set_text(footer,"无法录音");return;
     }
-    if(s.delete_review_busy||s.delete_review.stage!=MEETING_DELETE_UI_IDLE){
+    if(delete_visible){
         lv_label_set_text(title,s.delete_review.stage==MEETING_DELETE_UI_CONFIRM?"确认删除":"删除录音");
         if(s.delete_commit_busy)lv_label_set_text(body,"正在准备删除...\n\n请稍候。");
         else if(s.delete_review_busy)lv_label_set_text(body,"正在检查录音...\n\n长按 OK 取消。");
@@ -129,10 +165,9 @@ static void refresh(lv_timer_t *timer)
     }
     if(page==0){
         lv_label_set_text(title,"会议录音");
+        refresh_recording_panel(&s);
         const char *detail=upload_detail_text(s.network);
-        lv_label_set_text_fmt(body,"%s\n\n%02lu:%02lu\n\n录音 %lu 条 | 剩余 %lu KB%s%s",
-            s.rec_status==SC_REC_RECORDING?"录音中":s.rec_status==SC_REC_PAUSED?"已暂停":"准备录音",
-            (unsigned long)(s.rec_seconds/60),(unsigned long)(s.rec_seconds%60),
+        lv_label_set_text_fmt(body,"录音 %lu 条 | 剩余 %lu KB%s%s",
             (unsigned long)s.file_count,(unsigned long)s.free_kb,detail[0]?"\n":"",detail);
         lv_label_set_text(footer,s.toast[0]?sc_ui_toast_text(s.toast):
                           s.rec_status==SC_REC_RECORDING?"OK 暂停 | 长按保存":
@@ -200,6 +235,35 @@ static void refresh(lv_timer_t *timer)
     }
 }
 
+static void create_recording_panel(lv_obj_t *screen)
+{
+    recording_panel = lv_obj_create(screen);
+    lv_obj_remove_style_all(recording_panel);
+    lv_obj_set_pos(recording_panel, 0, 78);
+    lv_obj_set_size(recording_panel, lv_pct(100), RING_DIAMETER);
+    lv_obj_remove_flag(recording_panel, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+
+    recording_ring = lv_arc_create(recording_panel);
+    lv_obj_remove_style_all(recording_ring);
+    lv_obj_remove_flag(recording_ring, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_size(recording_ring, RING_DIAMETER, RING_DIAMETER);
+    lv_obj_center(recording_ring);
+    lv_arc_set_bg_angles(recording_ring, 0, 360);
+    lv_arc_set_rotation(recording_ring, 270);
+    lv_arc_set_range(recording_ring, 0, 100);
+    lv_obj_set_style_arc_width(recording_ring, RING_WIDTH, LV_PART_MAIN);
+    lv_obj_set_style_arc_color(recording_ring, lv_color_hex(RING_TRACK), LV_PART_MAIN);
+    lv_obj_set_style_arc_width(recording_ring, RING_WIDTH, LV_PART_INDICATOR);
+    lv_obj_set_style_arc_color(recording_ring, lv_color_hex(BLUE), LV_PART_INDICATOR);
+    lv_arc_set_value(recording_ring, 0);
+
+    recording_clock = make_text(recording_panel, &lv_font_montserrat_32, 0,
+                                (RING_DIAMETER - lv_font_montserrat_32.line_height) / 2, lv_pct(100), INK);
+    lv_obj_set_style_text_align(recording_clock, LV_TEXT_ALIGN_CENTER, 0);
+    recording_state = make_text(recording_panel, &meeting_font_16, 0, RING_DIAMETER / 2 + 25, lv_pct(100), MUTED);
+    lv_obj_set_style_text_align(recording_state, LV_TEXT_ALIGN_CENTER, 0);
+}
+
 esp_err_t sc_ui_init(void)
 {
     lv_obj_t *screen=lv_obj_create(NULL);lv_obj_set_scrollable(screen,false);
@@ -236,6 +300,7 @@ esp_err_t sc_ui_init(void)
     lv_label_set_text(battery_unknown,"?");
     title=make_text(screen,&meeting_font_16,20,55,200,INK);
     body=make_text(screen,&meeting_font_16,20,95,200,INK);
+    create_recording_panel(screen);
     config_wifi_row=make_text(screen,&meeting_font_16,20,95,200,INK);
     config_wifi_name=make_text(screen,&meeting_font_16,116,95,104,INK);
     lv_label_set_long_mode(config_wifi_name,LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
@@ -243,7 +308,11 @@ esp_err_t sc_ui_init(void)
     config_ble_name=make_text(screen,&meeting_font_16,116,95+meeting_font_16.line_height+5,104,INK);
     lv_label_set_long_mode(config_ble_name,LV_LABEL_LONG_MODE_SCROLL_CIRCULAR);
     footer=make_text(screen,&meeting_font_16,20,282,200,MUTED);
-    lv_screen_load(screen);refresh(NULL);lv_timer_create(refresh,200,NULL);return ESP_OK;
+    lv_screen_load(screen);
+    refresh(NULL);
+    lv_timer_create(refresh, 200, NULL);
+    lv_timer_create(refresh_recording_level, 80, NULL);
+    return ESP_OK;
 }
 void sc_ui_page_step(int delta)
 {
