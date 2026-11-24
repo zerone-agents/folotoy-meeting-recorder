@@ -125,11 +125,17 @@ static void hdr_encode(uint8_t h[HDR_SIZE], uint32_t id, uint32_t start, uint32_
     memcpy(h + 56, nonce, 16);
 }
 
+static bool hdr_read_file(FILE *f, uint8_t h[HDR_SIZE])
+{
+    return fseek(f, 0, SEEK_SET) == 0 && fread(h, 1, HDR_SIZE, f) == HDR_SIZE &&
+           sc_rd32(h) == HDR_MAGIC && sc_rd32(h + 4) == HDR_VERSION;
+}
+
 static bool hdr_read(const char *path, uint8_t h[HDR_SIZE])
 {
     FILE *f = fopen(path, "rb");
     if (!f) return false;
-    bool ok = fread(h, 1, HDR_SIZE, f) == HDR_SIZE && sc_rd32(h) == HDR_MAGIC && sc_rd32(h + 4) == HDR_VERSION;
+    bool ok = hdr_read_file(f, h);
     fclose(f);
     return ok;
 }
@@ -331,9 +337,9 @@ esp_err_t sc_store_prepare_snapshot(uint32_t file_id, meeting_snapshot *out, mee
     esp_err_t result = ESP_FAIL;
     nvs_handle_t handle = 0;
     bool opened = false;
-    char path[48]; uint8_t header[HDR_SIZE];
-    path_dat(path, sizeof(path), file_id);
-    if (!hdr_read(path, header) || sc_rd32(header + 8) != file_id) goto done;
+    uint8_t header[HDR_SIZE];
+    /* LittleFS may count the same blocks twice after closing a second reader. */
+    if (!hdr_read_file(file, header) || sc_rd32(header + 8) != file_id) goto done;
     if (nvs_open("meeting_snap", NVS_READWRITE, &handle) != ESP_OK) goto done;
     opened = true;
     meeting_snapshot_nvs storage = {.handle=handle, .file_id=file_id};

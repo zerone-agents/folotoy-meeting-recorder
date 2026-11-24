@@ -58,7 +58,7 @@ void sc_store_test_simulate_reboot(void);
 static void write32(uint8_t *p,uint32_t n){for(unsigned i=0;i<4;i++)p[i]=(uint8_t)(n>>(8*i));}
 int main(void)
 {
-    char recdir[256],audio[256],index[256];assert(mkdir(SC_STORE_BASE_PATH,0700)==0);
+    char recdir[256],audio[256],index[256],pinned_audio[256];assert(mkdir(SC_STORE_BASE_PATH,0700)==0);
     snprintf(recdir,sizeof(recdir),"%s/rec",SC_STORE_BASE_PATH);assert(mkdir(recdir,0700)==0);
     snprintf(audio,sizeof(audio),"%s/rec/7.dat",SC_STORE_BASE_PATH);snprintf(index,sizeof(index),"%s/rec/7.idx",SC_STORE_BASE_PATH);
     uint8_t data[100]={0};memcpy(data,"SCR1",4);data[4]=1;write32(data+8,7);write32(data+20,1);data[96]=3;data[97]=0xf8;data[98]=0xff;data[99]=0xfe;
@@ -69,7 +69,11 @@ int main(void)
     assert(!sc_store_ready());
     assert(sc_store_init()==ESP_OK&&sc_store_ready()&&sc_store_count()==1);
     FILE *source=sc_store_upload_acquire(7);assert(source);meeting_snapshot snapshot;
+    /* Keep the pinned source readable while making a second path-based open fail. */
+    snprintf(pinned_audio,sizeof(pinned_audio),"%s/rec/7.pinned",SC_STORE_BASE_PATH);
+    assert(fseek(source,5,SEEK_SET)==0&&rename(audio,pinned_audio)==0);
     assert(sc_store_prepare_snapshot(7,&snapshot,not_cancelled,NULL)==ESP_OK);
+    assert(rename(pinned_audio,audio)==0);
     assert(sc_store_upload_release(source)==ESP_OK);
     assert(sc_store_cleanup_confirmed(7,not_cancelled,NULL)==MEETING_CLEANUP_ERROR&&access(audio,F_OK)==0);
     source=sc_store_upload_acquire(7);assert(source);meeting_manifest manifest;
