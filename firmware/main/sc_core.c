@@ -123,7 +123,7 @@ static sc_session_t s_session;
 static bool s_keep_session;         // 1A05 之后会话要跨越 BLE 断开留给 Wi-Fi 使用
 static uint8_t s_rec_status = SC_REC_STOPPED;
 static uint32_t s_rec_file;
-static bool s_record_pending;
+static enum { RECORD_START_NONE, RECORD_START_PENDING, RECORD_START_RETRY_OFFLINE } s_record_pending;
 static bool s_management_legacy_stopped;
 static meeting_record_preempt_async s_management_preempt;
 static atomic_bool s_management_preempt_requested;
@@ -480,8 +480,18 @@ static bool record_start_owned(int64_t deadline)
         return false;
     }
     if (s_rec_status == SC_REC_RECORDING) return true;
-    if(sc_audio_prepare()!=ESP_OK){
-        (void)sc_audio_release_encoder_idle();
+    if(!meeting_idle_before_deadline(now_ms(),deadline)){toast("Upload busy - start failed");return false;}
+    esp_err_t prepared = sc_audio_prepare();
+    if (prepared != ESP_OK) {
+        bool audio_released = sc_audio_release_encoder_idle();
+        // Retry before creating a file, with the same recording request and deadline.
+        if (audio_released && prepared == ESP_ERR_NO_MEM && s_rec_status == SC_REC_STOPPED &&
+            meeting_idle_before_deadline(now_ms(), deadline) && meeting_network_record_require_offline()) {
+            s_record_pending = RECORD_START_RETRY_OFFLINE;
+            s_record_deadline = deadline;
+            ESP_LOGW(TAG, "Audio memory low with Wi-Fi connected; retrying recording offline");
+            return false;
+        }
         toast("Mic unavailable");return false;
     }
     if(!meeting_idle_before_deadline(now_ms(),deadline)){toast("Upload busy - start failed");return false;}
@@ -530,6 +540,29 @@ static bool record_start_owned(int64_t deadline)
     return true;
 }
 
+/* Keep runtime ownership while the same request waits for STA to stop. */
+static bool record_attempt_owned(int64_t deadline)
+{
+    s_record_pending = RECORD_START_NONE;
+    s_record_preempt_generation = 0;
+    if (record_start_owned(deadline)) return true;
+    if (s_record_pending == RECORD_START_NONE) {
+        (void)sc_audio_release_encoder_idle();
+        (void)meeting_runtime_record_end();
+        meeting_network_record_release();
+    }
+    return false;
+}
+
+static void record_cancel_pending(void)
+{
+    if (s_record_pending == RECORD_START_RETRY_OFFLINE) (void)meeting_runtime_record_end();
+    else (void)meeting_runtime_record_cancel();
+    s_record_pending = RECORD_START_NONE;
+    s_record_preempt_generation = 0;
+    meeting_network_record_release();
+}
+
 #if CONFIG_MEETING_SUPERVISED_TEST_RECORD || CONFIG_MEETING_SUPERVISED_TEST_AFTER_SYNC
 #ifndef CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
 #define CONFIG_MEETING_SUPERVISED_TEST_NO_WAN 0
@@ -565,18 +598,12 @@ static bool record_start(void)
         if(!meeting_record_preempt_begin(&s_management_preempt,&s_record_preempt_generation)){
             (void)meeting_runtime_record_cancel();meeting_network_record_release();toast("Bluetooth busy");return false;
         }
-        s_record_pending=true;s_record_deadline=deadline;
+        s_record_pending=RECORD_START_PENDING;s_record_deadline=deadline;
         atomic_store(&s_management_preempt_requested,true);xTaskNotifyGive(s_xfer_task);
         toast("Stopping upload...");return false;
     }
-    if (meeting_network_record_ready() && meeting_runtime_record_acquire()) {
-        if (record_start_owned(deadline)) return true;
-        (void)meeting_runtime_record_end();
-        (void)sc_audio_release_encoder_idle();
-        meeting_network_record_release();
-        return false;
-    }
-    s_record_pending=true;
+    if (meeting_network_record_ready() && meeting_runtime_record_acquire()) return record_attempt_owned(deadline);
+    s_record_pending=RECORD_START_PENDING;
     s_record_deadline=deadline;
     toast("Stopping upload...");
     return false;
@@ -833,7 +860,7 @@ static void handle_cmd(const sc_cmd_t *cmd, void *ctx)
                 if (record_start()) toast("Recording (app)");
             } else if (cmd->payload[0] == 2) {
                 if (s_record_pending) {
-                    (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;toast("Start cancelled");
+                    record_cancel_pending();toast("Start cancelled");
                 } else record_pause();
             }
             send_record_status();
@@ -1067,7 +1094,7 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev)
     if (ev == BSP_BTN_CLICK) {
         if (s_link >= SC_LINK_WIFI_PENDING) return;
         if (s_record_pending) {
-            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;toast("Start cancelled");
+            record_cancel_pending();toast("Start cancelled");
         } else if (s_rec_status == SC_REC_RECORDING) {
             record_pause();
             toast("Paused");
@@ -1077,7 +1104,7 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         send_record_status();
     } else if (ev == BSP_BTN_LONG) {
         if (s_record_pending) {
-            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;toast("Start cancelled");
+            record_cancel_pending();toast("Start cancelled");
         } else if (s_link >= SC_LINK_WIFI_AP) {
             wifi_end("Wi-Fi cancelled");
         } else if (s_rec_status != SC_REC_STOPPED) {
@@ -1268,17 +1295,14 @@ static void tick(void)
         bool preempt_complete=!s_record_preempt_generation||
             meeting_record_preempt_take(&s_management_preempt,s_record_preempt_generation,&preempt_ok);
         if (!meeting_idle_before_deadline(t, s_record_deadline)) {
-            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;
-            s_record_preempt_generation=0;
+            record_cancel_pending();
             toast("Upload busy - start failed");send_record_status();
         } else if(preempt_complete&&!preempt_ok){
-            (void)meeting_runtime_record_cancel();meeting_network_record_release();s_record_pending=false;
-            s_record_preempt_generation=0;toast("Bluetooth busy");send_record_status();
-        } else if (preempt_complete&&meeting_network_record_ready() && meeting_runtime_record_acquire()) {
-            s_record_pending=false;
-            s_record_preempt_generation=0;
-            if (record_start_owned(s_record_deadline)) toast("Recording");
-            else {(void)meeting_runtime_record_end();(void)sc_audio_release_encoder_idle();meeting_network_record_release();}
+            record_cancel_pending();
+            toast("Bluetooth busy");send_record_status();
+        } else if (preempt_complete && meeting_network_record_ready() &&
+                   (s_record_pending == RECORD_START_RETRY_OFFLINE || meeting_runtime_record_acquire())) {
+            if (record_attempt_owned(s_record_deadline)) toast("Recording");
             send_record_status();
         }
     }

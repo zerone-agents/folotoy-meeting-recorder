@@ -6,7 +6,7 @@
 
 static int wifi_running,ip,sta_running,spawn_ok=1,mutex_deleted,passes,connects,notifications,stop_failure,stop_during_pass,recover_after_delay;
 static int try_calls,fail_try;
-static int replace_management_during_stop;
+static int replace_management_during_stop,replace_record_during_stop,request_record_during_pass;
 static int release_management_on_stop_wait;
 static int clock_sync_calls,clock_sync_success,clock_sync_record;
 static unsigned delete_failures;static meeting_network_state state_before_wait;
@@ -45,8 +45,9 @@ meeting_time_client_result meeting_time_device_sync(meeting_time_challenge *chal
 }
 esp_err_t meeting_sta_start(const char *ssid,const char *password){assert(!strcmp(ssid,"wifi")&&!strcmp(password,"12345678"));sta_running=1;connects++;return ESP_OK;}
 esp_err_t meeting_sta_reconnect(void){connects++;return ESP_OK;}
-esp_err_t meeting_sta_stop(void){if(stop_failure)return ESP_FAIL;sta_running=0;
+esp_err_t meeting_sta_stop(void){if(stop_failure)return ESP_FAIL;sta_running=0;ip=0;
  if(replace_management_during_stop){replace_management_during_stop=0;meeting_network_management_release();meeting_network_management_request();}
+ if(replace_record_during_stop){replace_record_during_stop=0;meeting_network_record_release();meeting_network_record_request();}
  return ESP_OK;}
 void meeting_config_clear(meeting_config *c){memset(c,0,sizeof(*c));}
 meeting_worker_result meeting_worker_pass(const meeting_online_config *config,sc_file_entry_t *entries,size_t capacity)
@@ -57,6 +58,11 @@ meeting_worker_result meeting_worker_pass(const meeting_online_config *config,sc
     assert(!config->https.is_cancelled(config->https.cancel_ctx));passes++;
     meeting_network_record_request();
     assert(config->https.is_cancelled(config->https.cancel_ctx));
+    if(request_record_during_pass){
+        request_record_during_pass=0;
+        assert(!meeting_network_record_ready()&&sta_running&&ip);
+        return (meeting_worker_result){.paused=true};
+    }
     meeting_network_record_release();
     assert(!config->https.is_cancelled(config->https.cancel_ctx));
     meeting_network_management_request();
@@ -70,6 +76,70 @@ meeting_worker_result meeting_worker_pass(const meeting_online_config *config,sc
 static bool commit_floor(void *ctx,int64_t floor){(void)ctx;(void)floor;return true;}
 static int read_floor(void *ctx,int64_t *floor){(void)ctx;*floor=1800000000;return 0;}
 static bool set_wall(void *ctx,int64_t epoch){(void)ctx;(void)epoch;return true;}
+
+/* The fake task exits after its first wait. Restore the enabled flag so
+ * public readiness checks inspect the state published by that iteration. */
+static void run_worker_iteration(void)
+{
+    atomic_store(&s_enabled,true);
+    task_fn(NULL);
+    atomic_store(&s_enabled,true);
+}
+
+static void test_recording_wifi(void)
+{
+    int initial_passes=passes;
+    int initial_connects=connects;
+    sta_running=1;
+    ip=1;
+    request_record_during_pass=1;
+    run_worker_iteration();
+    assert(passes==initial_passes+1&&!meeting_network_record_ready());
+
+    /* Upload unwinds before recording can acquire its existing connection. */
+    run_worker_iteration();
+    assert(meeting_network_record_ready()&&sta_running&&ip);
+    assert(passes==initial_passes+1&&connects==initial_connects);
+
+    /* Saving wakes the upload worker on the same connection. */
+    meeting_network_record_saved();
+    meeting_network_record_release();
+    run_worker_iteration();
+    assert(sta_running&&ip&&passes==initial_passes+2&&connects==initial_connects);
+
+    meeting_network_record_request();
+    run_worker_iteration();
+    /* Losing the AP while recording defers reconnection until save/release. */
+    ip=0;
+    run_worker_iteration();
+    assert(meeting_network_record_ready()&&sta_running&&!ip);
+    assert(passes==initial_passes+2&&connects==initial_connects);
+
+    /* A single fallback invalidates readiness until the driver is stopped. */
+    assert(meeting_network_record_require_offline());
+    assert(!meeting_network_record_require_offline()&&!meeting_network_record_ready());
+    stop_failure=1;
+    run_worker_iteration();
+    assert(sta_running&&!meeting_network_record_ready());
+    stop_failure=0;
+    run_worker_iteration();
+    assert(!sta_running&&meeting_network_record_ready()&&!meeting_network_record_require_offline());
+    assert(passes==initial_passes+2&&connects==initial_connects);
+    meeting_network_record_release();
+    assert(!meeting_network_record_ready()&&!meeting_network_record_require_offline());
+
+    /* A late completion for a cancelled request cannot ready its replacement. */
+    sta_running=1;
+    replace_record_during_stop=1;
+    meeting_network_record_request();
+    run_worker_iteration();
+    assert(!replace_record_during_stop&&!sta_running&&!meeting_network_record_ready());
+    run_worker_iteration();
+    assert(meeting_network_record_ready());
+    meeting_network_record_release();
+    assert(!meeting_network_record_ready());
+}
+
 int main(void)
 {
     meeting_config cfg={.ssid="wifi",.password="12345678",.origin="https://example.com",.device_token="token",.ca_pem="cert",.timezone_minutes=480};
@@ -95,19 +165,20 @@ int main(void)
     atomic_store(&s_enabled,true);ip=1;delete_failures=1;task_fn(NULL);
     assert(state_before_wait==MEETING_NETWORK_RETRY&&passes==2);
     ip=0;delete_failures=0;
-    /* A pending recording must stop Wi-Fi before it reports readiness and
-     * must never start an upload while the radio is being released. */
+    /* An attempt without an established connection drains Wi-Fi before
+     * recording, and cannot run upload while doing so. */
     atomic_store(&s_enabled,true);sta_running=1;meeting_network_record_request();
-    assert(!meeting_network_record_ready());task_fn(NULL);
-    assert(!sta_running&&atomic_load(&s_record_ready)&&passes==2);
-    atomic_store(&s_enabled,true);sta_running=1;stop_failure=1;
-    meeting_network_record_request();task_fn(NULL);
-    assert(sta_running&&!atomic_load(&s_record_ready)&&passes==2);
+    assert(!meeting_network_record_ready());run_worker_iteration();
+    assert(!sta_running&&meeting_network_record_ready()&&passes==2);
+    meeting_network_record_release();
+    sta_running=1;stop_failure=1;
+    meeting_network_record_request();run_worker_iteration();
+    assert(sta_running&&!meeting_network_record_ready()&&passes==2);
     stop_failure=0;meeting_network_record_release();
-    assert(!atomic_load(&s_record_requested));
+    assert(!meeting_network_record_ready());
     /* A management window waits for the supervisor to stop STA; releasing
      * that window must never clear an independent recording request. */
-    atomic_store(&s_enabled,true);sta_running=1;meeting_network_management_request();
+    atomic_store(&s_enabled,true);sta_running=1;ip=1;meeting_network_management_request();
     assert(!meeting_network_management_ready());task_fn(NULL);
     assert(!sta_running&&meeting_network_management_ready());
     /* Once the drain has handed the radio to management, a candidate trial
@@ -115,14 +186,11 @@ int main(void)
      * when recording requests management preemption. */
     atomic_store(&s_enabled,true);sta_running=1;task_fn(NULL);
     assert(sta_running);
-    atomic_store(&s_enabled,true);meeting_network_record_request();task_fn(NULL);
-    assert(sta_running&&!atomic_load(&s_record_ready));
-    /* A delayed readiness publication cannot bypass management ownership. */
-    atomic_store(&s_record_ready,true);
-    assert(!meeting_network_record_ready());
+    atomic_store(&s_enabled,true);meeting_network_record_request();run_worker_iteration();
+    assert(sta_running&&!meeting_network_record_ready());
     /* Simulate the management owner stopping its candidate before release. */
     sta_running=0;meeting_network_management_release();
-    atomic_store(&s_enabled,true);task_fn(NULL);
+    run_worker_iteration();
     assert(meeting_network_record_ready());
     meeting_network_record_release();
     /* Reopen a management drain for the slot-application checks below. */
@@ -146,7 +214,7 @@ int main(void)
     meeting_network_record_request();assert(!meeting_network_management_ready());
     assert(!meeting_network_apply_wifi_slot(&slot_io,2,fake_active.request_id,fake_active.digest));
     meeting_network_management_release();
-    assert(atomic_load(&s_record_requested));
+    assert(!management_requested()&&cancelled(NULL));
     meeting_network_record_release();
     /* A disabled supervisor alone is not proof that another STA owner has
      * relinquished the radio. */
@@ -176,9 +244,10 @@ int main(void)
     assert(meeting_network_activate_restored(&cfg,&anchor,"http://example.com",&io)==ESP_OK);
     int before_pass=passes;task_fn(NULL);assert(clock_sync_calls==1&&passes==before_pass);
     /* During bootstrap, a recording request wins before any upload starts. */
-    atomic_store(&s_enabled,true);clock_sync_record=1;task_fn(NULL);
-    assert(clock_sync_calls==2&&passes==before_pass&&!sta_running&&atomic_load(&s_record_ready));
+    atomic_store(&s_enabled,true);clock_sync_record=1;run_worker_iteration();
+    assert(clock_sync_calls==2&&passes==before_pass&&sta_running&&ip&&meeting_network_record_ready());
     meeting_network_record_release();clock_sync_record=0;clock_sync_success=1;atomic_store(&s_enabled,true);task_fn(NULL);
     assert(clock_sync_calls==3&&passes==before_pass+1);
+    test_recording_wifi();
     return 0;
 }

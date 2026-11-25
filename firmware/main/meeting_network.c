@@ -53,7 +53,19 @@ static char s_http_origin[201];
 static bool s_time_restore;
 static SemaphoreHandle_t s_clock_lock,s_lifecycle_lock;
 static atomic_bool s_enabled,s_stop_requested;
-static atomic_bool s_record_requested, s_record_ready;
+/* Low bits hold the phase. A new request advances the generation so a late
+ * worker completion cannot publish readiness for the next request. */
+enum {
+    RECORD_IDLE, RECORD_PENDING, RECORD_READY_WITH_STA, RECORD_DRAIN_PENDING,
+    RECORD_READY_WITHOUT_STA, RECORD_PHASE_MASK=7,
+};
+static atomic_uint s_record_state;
+static unsigned record_phase(unsigned state){return state&RECORD_PHASE_MASK;}
+static bool record_requested(void){return record_phase(atomic_load(&s_record_state))!=RECORD_IDLE;}
+static bool record_transition(unsigned expected,unsigned phase)
+{
+    return atomic_compare_exchange_strong(&s_record_state,&expected,(expected&~RECORD_PHASE_MASK)|phase);
+}
 /* Once the supervisor drains STA, the management controller owns the radio
  * until it releases the window, including during recording preemption. */
 /* Low bits are idle/pending/drained; upper bits identify each request. */
@@ -75,7 +87,14 @@ static int64_t s_last_checkpoint;
 static const char *TAG="meeting_network";
 
 bool meeting_network_enabled(void){return atomic_load(&s_enabled);}
-meeting_network_state meeting_network_get_state(void){return (meeting_network_state)atomic_load(&s_state);}
+meeting_network_state meeting_network_get_state(void)
+{
+    unsigned phase=record_phase(atomic_load(&s_record_state));
+    if(meeting_network_enabled()&&!atomic_load(&s_stop_requested)&&
+       (phase==RECORD_READY_WITH_STA||phase==RECORD_DRAIN_PENDING||phase==RECORD_READY_WITHOUT_STA))
+        return MEETING_NETWORK_IDLE;
+    return (meeting_network_state)atomic_load(&s_state);
+}
 static void notify_worker(void)
 {
     if(!s_lifecycle_lock||xSemaphoreTake(s_lifecycle_lock,portMAX_DELAY)!=pdTRUE)return;
@@ -88,7 +107,6 @@ bool meeting_network_stop_request(void)
     if(xSemaphoreTake(s_lifecycle_lock,portMAX_DELAY)!=pdTRUE)return false;
     if(meeting_network_enabled()){
         atomic_store(&s_stop_requested,true);
-        atomic_store(&s_record_ready,false);
         atomic_store(&s_state,MEETING_NETWORK_STOPPING);
         if(s_task)xTaskNotifyGive(s_task);
     }
@@ -98,43 +116,58 @@ bool meeting_network_stop_complete(void){return !meeting_network_enabled();}
 void meeting_network_record_saved(void)
 {
 #if CONFIG_MEETING_SUPERVISED_TEST_NO_WAN
-    if(atomic_load(&s_record_requested)&&meeting_commission_allowed()){
+    if(record_requested()&&meeting_commission_allowed()){
         atomic_store(&test_no_wan_phase,1);
         if(!test_no_wan_write(1))ESP_LOGE(TAG,"TEST no-WAN marker persist failed");
     }
 #endif
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
-    if(atomic_load(&s_record_requested)&&meeting_commission_allowed())atomic_store(&s_test_saved_recording,true);
+    if(record_requested()&&meeting_commission_allowed())atomic_store(&s_test_saved_recording,true);
 #endif
     if(meeting_network_enabled())notify_worker();
 }
 void meeting_network_record_request(void)
 {
-    atomic_store(&s_record_ready,false);
-    atomic_store(&s_record_requested,true);
+    unsigned state=atomic_load(&s_record_state);
+    atomic_store(&s_record_state,((state&~RECORD_PHASE_MASK)+RECORD_PHASE_MASK+1u)|RECORD_PENDING);
     if(meeting_network_enabled())notify_worker();
 }
 bool meeting_network_record_ready(void)
-{return !management_requested()&&(!meeting_network_enabled()||(!atomic_load(&s_stop_requested)&&atomic_load(&s_record_ready)));}
+{
+    unsigned management=atomic_load(&s_management_state);
+    if((management&MANAGEMENT_MASK)!=MANAGEMENT_IDLE)return false;
+    unsigned recording=atomic_load(&s_record_state);
+    unsigned phase=record_phase(recording);
+    bool enabled=meeting_network_enabled();
+    bool ready=enabled?(phase==RECORD_READY_WITH_STA||phase==RECORD_READY_WITHOUT_STA):phase!=RECORD_IDLE;
+    return ready&&atomic_load(&s_management_state)==management&&atomic_load(&s_record_state)==recording&&
+        enabled==meeting_network_enabled()&&(!enabled||!atomic_load(&s_stop_requested));
+}
+bool meeting_network_record_require_offline(void)
+{
+    unsigned recording=atomic_load(&s_record_state);
+    if(!meeting_network_enabled()||atomic_load(&s_stop_requested)||record_phase(recording)!=RECORD_READY_WITH_STA||
+       !record_transition(recording,RECORD_DRAIN_PENDING))return false;
+    notify_worker();
+    return true;
+}
 void meeting_network_record_release(void)
 {
-    atomic_store(&s_record_requested,false);
-    atomic_store(&s_record_ready,false);
+    unsigned recording=atomic_load(&s_record_state);
+    atomic_store(&s_record_state,recording&~RECORD_PHASE_MASK);
     if(meeting_network_enabled())notify_worker();
 }
 void meeting_network_management_request(void)
 {
-    atomic_store(&s_record_ready,false);
     management_set_phase(MANAGEMENT_PENDING);
     if(meeting_network_enabled())notify_worker();
 }
 bool meeting_network_management_ready(void)
-{unsigned state=atomic_load(&s_management_state);return (state&MANAGEMENT_MASK)!=MANAGEMENT_IDLE&&!atomic_load(&s_record_requested)&&
+{unsigned state=atomic_load(&s_management_state);return (state&MANAGEMENT_MASK)!=MANAGEMENT_IDLE&&!record_requested()&&
     !meeting_sta_running()&&(!meeting_network_enabled()||(!atomic_load(&s_stop_requested)&&(state&MANAGEMENT_MASK)==MANAGEMENT_DRAINED));}
 void meeting_network_management_release(void)
 {
     management_set_phase(MANAGEMENT_IDLE);
-    if(!atomic_load(&s_record_requested))atomic_store(&s_record_ready,false);
     if(meeting_network_enabled())notify_worker();
 }
 static char display_ssid[33];
@@ -162,8 +195,8 @@ bool meeting_network_apply_wifi_slot(const meeting_wifi_slots_io *slots,uint64_t
     return ok;
 }
 static bool has_ip(void *ctx){(void)ctx;return meeting_sta_has_ip();}
-static bool cancelled(void *ctx){(void)ctx;return !meeting_network_enabled()||atomic_load(&s_stop_requested)||atomic_load(&s_record_requested)||management_requested();}
-static bool clock_cancelled(void *ctx){return cancelled(ctx)||atomic_load(&s_record_requested)||!meeting_sta_has_ip();}
+static bool cancelled(void *ctx){(void)ctx;return !meeting_network_enabled()||atomic_load(&s_stop_requested)||record_requested()||management_requested();}
+static bool clock_cancelled(void *ctx){return cancelled(ctx)||!meeting_sta_has_ip();}
 static bool time_valid(void *ctx)
 {
     (void)ctx;if(!s_clock_lock||xSemaphoreTake(s_clock_lock,portMAX_DELAY)!=pdTRUE)return false;
@@ -206,6 +239,27 @@ meeting_clock_view meeting_network_clock_view(int16_t *timezone_minutes)
     }
     xSemaphoreGive(s_lifecycle_lock);return result;
 }
+static void park_for_radio(unsigned recording,unsigned management)
+{
+    unsigned phase=record_phase(recording);
+    if((management&MANAGEMENT_MASK)!=MANAGEMENT_IDLE){
+        /* Once drained, the controller must stop its own trial before releasing. */
+        if((management&MANAGEMENT_MASK)!=MANAGEMENT_PENDING||atomic_load(&s_management_state)!=management)return;
+        if(phase==RECORD_READY_WITH_STA)(void)record_transition(recording,RECORD_DRAIN_PENDING);
+        if(meeting_sta_running()&&meeting_sta_stop()!=ESP_OK)return;
+        unsigned expected=management;
+        (void)atomic_compare_exchange_strong(&s_management_state,&expected,(management&~MANAGEMENT_MASK)|MANAGEMENT_DRAINED);
+        return;
+    }
+
+    /* The selected mode is kept until release, even if an AP disappears. */
+    if(phase!=RECORD_PENDING&&phase!=RECORD_DRAIN_PENDING)return;
+    unsigned ready=phase==RECORD_PENDING&&meeting_sta_has_ip()?RECORD_READY_WITH_STA:RECORD_READY_WITHOUT_STA;
+    if(atomic_load(&s_management_state)!=management||atomic_load(&s_record_state)!=recording||atomic_load(&s_stop_requested))return;
+    if(ready==RECORD_READY_WITHOUT_STA&&meeting_sta_running()&&meeting_sta_stop()!=ESP_OK)return;
+    if(atomic_load(&s_management_state)==management&&!atomic_load(&s_stop_requested))
+        (void)record_transition(recording,ready);
+}
 static void task(void *arg)
 {
     (void)arg;
@@ -235,26 +289,17 @@ static void task(void *arg)
         .ca_pem=preferred_ca,.fallback_ca_pem=preferred_ca==s_config.ca_pem?NULL:s_config.ca_pem,
         .is_cancelled=cancelled,.time_valid=time_valid},.has_ip=has_ip};
     while(meeting_network_enabled()&&!atomic_load(&s_stop_requested)){
-        if(atomic_load(&s_record_requested)||management_requested()){
+        unsigned recording=atomic_load(&s_record_state);
+        unsigned management=atomic_load(&s_management_state);
+        if(record_phase(recording)!=RECORD_IDLE||(management&MANAGEMENT_MASK)!=MANAGEMENT_IDLE){
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
             if(!test_finished&&atomic_load(&s_test_saved_recording))test_armed=true;
 #endif
-            unsigned management=atomic_load(&s_management_state);
-            if((management&MANAGEMENT_MASK)==MANAGEMENT_DRAINED){
-                /* The controller will stop its own trial before releasing. */
-                atomic_store(&s_record_ready,false);
-            }else if(meeting_sta_running()&&meeting_sta_stop()!=ESP_OK){
-                atomic_store(&s_record_ready,false);
-            }else{
-                if((management&MANAGEMENT_MASK)==MANAGEMENT_PENDING){
-                    unsigned expected=management;
-                    (void)atomic_compare_exchange_strong(&s_management_state,&expected,(management&~MANAGEMENT_MASK)|MANAGEMENT_DRAINED);
-                }
-                atomic_store(&s_record_ready,!management_requested());
-            }
+            park_for_radio(recording,management);
             (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(RETRY_MS));
             continue;
         }
+        if(cancelled(NULL))continue;
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
         if(!test_finished&&atomic_exchange(&s_test_saved_recording,false))test_armed=true;
         if(test_armed&&!test_started){
@@ -277,10 +322,11 @@ static void task(void *arg)
             (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(RETRY_MS));continue;
         }
 #endif
-        atomic_store(&s_record_ready,false);
         (void)meeting_runtime_resume_cleanup();
+        if(cancelled(NULL))continue;
         meeting_delete_pass_result deleted=meeting_runtime_resume_deletions(&config);
         if(deleted.failed)ESP_LOGW(TAG,"delete recovery needs retry: %u",deleted.failed);
+        if(cancelled(NULL))continue;
         if(!meeting_sta_running())(void)meeting_sta_start(s_config.ssid,s_config.password);
         else if(!meeting_sta_has_ip()){
             if(meeting_sta_reconnect()==ESP_ERR_INVALID_STATE)(void)meeting_sta_stop();
@@ -312,7 +358,7 @@ static void task(void *arg)
             }
         }
         else atomic_store(&s_state,MEETING_NETWORK_SYNCING);
-        if(atomic_load(&s_record_requested)||management_requested())continue;
+        if(cancelled(NULL))continue;
         if(meeting_sta_has_ip()&&time_valid(NULL))atomic_store(&s_state,MEETING_NETWORK_SYNCING);
         meeting_worker_result result={0};
         sc_file_entry_t *entries=calloc(UPLOAD_LIST_BATCH,sizeof(*entries));
