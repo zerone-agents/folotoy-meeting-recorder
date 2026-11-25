@@ -34,11 +34,14 @@ bool meeting_network_stop_request(void);
 bool meeting_network_stop_complete(void);
 /* Wake the upload supervisor after a recording has been durably saved. */
 void meeting_network_record_saved(void);
-/* Recording takes precedence: request an asynchronous Wi-Fi shutdown and
- * wait for readiness before allocating audio resources. Release on every
- * completion, cancellation, failure, or timeout. */
+/* Core-only, serialized requests. Wait for the upload worker to park before
+ * allocating audio resources. An already-connected STA can remain active.
+ * Release on every completion, cancellation, failure, or timeout. */
 void meeting_network_record_request(void);
 bool meeting_network_record_ready(void);
+/* Request an asynchronous STA shutdown once for the current online record
+ * request. A true result invalidates readiness until shutdown completes. */
+bool meeting_network_record_require_offline(void);
 void meeting_network_record_release(void);
 /* Management windows request the same radio drain independently of capture.
  * A release cannot clear a concurrent recording request. */
