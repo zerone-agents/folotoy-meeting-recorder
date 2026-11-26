@@ -171,7 +171,8 @@ static void refresh(lv_timer_t *timer)
             (unsigned long)s.file_count,(unsigned long)s.free_kb,detail[0]?"\n":"",detail);
         lv_label_set_text(footer,s.toast[0]?sc_ui_toast_text(s.toast):
                           s.rec_status==SC_REC_RECORDING?"OK 暂停 | 长按保存":
-                          s.rec_status==SC_REC_PAUSED?"OK 继续 | 长按保存":"OK 录音 | 长按保存");
+                          s.rec_status==SC_REC_PAUSED?"OK 继续 | 长按保存":
+                          s.continuation_upload?"上传后续录 | 长按取消":"OK 录音 | 长按保存");
     }else if(page==1){
         static sc_file_entry_t files[ROWS];char text[256];size_t pos=0;
         int selected=atomic_load(&selected_index);size_t start=selected<0?0:(size_t)selected/ROWS*ROWS;

@@ -34,6 +34,16 @@ bool meeting_network_stop_request(void);
 bool meeting_network_stop_complete(void);
 /* Wake the upload supervisor after a recording has been durably saved. */
 void meeting_network_record_saved(void);
+typedef enum {
+    MEETING_CONTINUATION_IDLE, MEETING_CONTINUATION_UPLOADING,
+    MEETING_CONTINUATION_CONFIRMED, MEETING_CONTINUATION_FAILED
+} meeting_continuation_state;
+/* Core-only. Arm while the saved recording still owns its record request.
+ * The network task makes one attempt and holds the outcome until cleared. */
+bool meeting_network_continue_after_upload(uint32_t file_id);
+/* Nonblocking status snapshot for the core and display tasks. */
+meeting_continuation_state meeting_network_continuation_state(void);
+void meeting_network_cancel_continuation(void);
 /* Core-only, serialized requests. Wait for the upload worker to park before
  * allocating audio resources. An already-connected STA can remain active.
  * Release on every completion, cancellation, failure, or timeout. */

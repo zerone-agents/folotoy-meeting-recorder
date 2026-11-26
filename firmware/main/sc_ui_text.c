@@ -20,7 +20,7 @@ static const text_pair messages[]={
  {"Setup failed - not active","配置失败，未启用"},{"Review clock setup","请核对时间"},
  {"Saved - awaiting PC","已保存，等待电脑"},{"Pairing cancelled","已取消配对"},
  {"Paused","已暂停"},{"Wi-Fi cancelled","已取消网络连接"},{"Saved","已保存"},
- {"30 minute limit - saved","已达 30 分钟，已保存"},{"Storage full - saved","空间已满，已保存"},
+ {"Saved - no next segment","已保存，未续录"},{"Next segment cancelled","已取消续录"},{"Storage full - saved","空间已满，已保存"},
  {"Upload enabled","上传已启用"},{"Network start failed","网络启动失败"},
  {"Upload busy - start failed","上传正忙，录音失败"},{"Pairing timed out","配对超时"},
  {"Wi-Fi export done","文件导出完成"},{"Wi-Fi timeout","网络连接超时"},
