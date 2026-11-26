@@ -10,6 +10,8 @@ const hash = (data) => createHash('sha256').update(data).digest('hex');
 const view = data => Buffer.from(data.buffer,data.byteOffset,data.byteLength);
 const receipt = m => ({count:m.chunks,bytes:m.bytes,digest:m.digest,reason:m.reason,recordedAt:m.recorded_at,timeTrust:m.time_trust});
 const MAX_NEW_CHUNKS=8192,MAX_PENDING_MEETINGS=64;
+export const MAX_WHOLE_AUDIO_BYTES = 5 * 1024 * 1024;
+const DEVICE_CHUNK_BYTES = 4096;
 const validId = (id) => typeof id === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(id);
 export class StoreError extends Error { constructor(code) { super(code); this.code = code; } }
 const fail = (code) => { throw new StoreError(code); };
@@ -153,6 +155,76 @@ export class MeetingStore {
   chunkWindow(owner,id,first,token) { if(!Number.isSafeInteger(first)||first<0||first>8191||first%16!==0)fail('invalid');return this.tx(()=>{this.authorize(owner,token);const m=this.owned(owner,id);if(m.state==='cancelled')fail('conflict');const chunks=this.db.prepare('SELECT seq,digest,data FROM chunks WHERE meeting_id=? AND seq>=? AND seq<? ORDER BY seq').all(id,first,first+16).map(row=>({seq:row.seq,digest:row.digest,size:row.data.length,valid:hash(row.data)===row.digest}));return {id:m.id,first,chunks};}); }
   list(owner,id,token,validateAudio) { return this.tx(()=>{this.authorize(owner,token);const m=this.owned(owner,id);if(m.chunks!==null){const audio=this.checkedAudio(id,m);if(validateAudio)validateAudio(audio);}const chunks=this.db.prepare('SELECT seq,digest,data FROM chunks WHERE meeting_id=? ORDER BY seq').all(id).map(row=>({seq:row.seq,digest:row.digest,size:row.data.length,valid:hash(row.data)===row.digest}));return {id:m.id,state:m.state,committed:m.chunks!==null,manifest:m.chunks!==null?receipt(m):null,chunks};}); }
   finalize(owner,id,manifest,token,validateAudio) { const {count,bytes,digest,reason,recordedAt=null,timeTrust='uncalibrated'}=manifest??{}; if(!['trusted','unverified','uncalibrated'].includes(timeTrust)||(recordedAt!==null&&(!Number.isSafeInteger(recordedAt)||recordedAt<946684800||recordedAt>4102444800))||(timeTrust==='trusted'&&recordedAt===null))fail('invalid');if(!Number.isSafeInteger(count)||count<1||count>100000||!Number.isSafeInteger(bytes)||bytes<1||bytes>20000000||!/^[a-f0-9]{64}$/.test(digest??'')||!['user','limit','storage','interrupted'].includes(reason)) fail('invalid'); return this.tx(()=>{this.authorize(owner,token);const m=this.owned(owner,id); if(m.state!=='uploading') { if(m.chunks===count && m.bytes===bytes && m.digest===digest && m.reason===reason && m.recorded_at===recordedAt && m.time_trust===timeTrust){const audio=this.checkedAudio(id,m);if(validateAudio)validateAudio(audio);return {id:m.id,state:m.state,committed:true,manifest:receipt(m)};} fail('conflict'); } const rows=this.db.prepare('SELECT seq,data,digest FROM chunks WHERE meeting_id=? ORDER BY seq').all(id); if(rows.length!==count || rows.some((x,i)=>x.seq!==i)) fail('missing_chunks'); const h=createHash('sha256'); let n=0; for(const row of rows){if(hash(row.data)!==row.digest)fail('integrity');h.update(row.data);n+=row.data.length;} if(n!==bytes||h.digest('hex')!==digest) fail('integrity');if(validateAudio)validateAudio(Buffer.concat(rows.map(row=>view(row.data))));this.db.prepare("UPDATE meetings SET state='queued',reason=?,chunks=?,bytes=?,digest=?,recorded_at=?,time_trust=? WHERE id=?").run(reason,count,bytes,digest,recordedAt,timeTrust,id); return {id:m.id,state:'queued',committed:true,manifest:{count,bytes,digest,reason,recordedAt,timeTrust}}; }); }
+  putAudio(owner, id, data, manifest, token, validateAudio) {
+    const {digest, reason, recordedAt, timeTrust} = manifest;
+    if (!validId(owner) || !validId(id) || !Buffer.isBuffer(data) ||
+        data.length < 1 || data.length > MAX_WHOLE_AUDIO_BYTES ||
+        !/^[a-f0-9]{64}$/.test(digest ?? '') || hash(data) !== digest ||
+        !['user', 'limit', 'storage', 'interrupted'].includes(reason) ||
+        !['trusted', 'unverified', 'uncalibrated'].includes(timeTrust) ||
+        (recordedAt !== null && (!Number.isSafeInteger(recordedAt) || recordedAt < 946684800 || recordedAt > 4102444800)) ||
+        (timeTrust === 'trusted' && recordedAt === null)) fail('invalid');
+    if (validateAudio) validateAudio(data);
+
+    // Keep the same chunk geometry used by older devices and stored receipts.
+    const count = Math.ceil(data.length / DEVICE_CHUNK_BYTES);
+    const chunk = seq => data.subarray(seq * DEVICE_CHUNK_BYTES, (seq + 1) * DEVICE_CHUNK_BYTES);
+    return this.tx(() => {
+      this.authorize(owner, token);
+      if (!this.db.prepare('SELECT 1 FROM meetings WHERE id=?').get(id)) {
+        const pending = this.db.prepare("SELECT COUNT(*) AS n FROM meetings WHERE owner=? AND state='uploading'").get(owner).n;
+        if (pending >= MAX_PENDING_MEETINGS) fail('too_many_pending');
+        this.db.prepare("INSERT INTO meetings(id,owner,state,chunk_limit) VALUES(?,?,'uploading',?)")
+          .run(id, owner, MAX_NEW_CHUNKS);
+      }
+      const meeting = this.owned(owner, id);
+      const committed = meeting.state !== 'uploading';
+      if (committed && (meeting.chunks !== count || meeting.bytes !== data.length || meeting.digest !== digest ||
+          meeting.reason !== reason || meeting.recorded_at !== recordedAt || meeting.time_trust !== timeTrust)) fail('conflict');
+      if (!committed && count > meeting.chunk_limit) fail('limit');
+      const existing = new Set();
+      const rows = this.db.prepare('SELECT seq,digest,data FROM chunks WHERE meeting_id=?').all(id);
+      let added = data.length;
+      const repairs = [];
+      for (const row of rows) {
+        if (row.seq < 0 || row.seq >= count) fail('integrity');
+        const part = chunk(row.seq);
+        if (row.digest !== hash(part)) fail('conflict');
+        if (hash(row.data) !== row.digest) repairs.push({seq: row.seq, part});
+        else if (!view(row.data).equals(part)) fail('conflict');
+        added -= row.data.length;
+        existing.add(row.seq);
+      }
+      if (committed && existing.size !== count) fail('integrity');
+      if (added > 0 && this.storageLimitBytes !== null) {
+        const used = this.db.prepare('SELECT COALESCE(SUM(length(data)),0) AS n FROM chunks').get().n;
+        if (used + added > this.storageLimitBytes) fail('storage_full');
+      }
+      const update = this.db.prepare('UPDATE chunks SET data=? WHERE meeting_id=? AND seq=?');
+      for (const repair of repairs) update.run(repair.part, id, repair.seq);
+      if (committed) {
+        const audio = this.checkedAudio(id, meeting);
+        if (validateAudio) validateAudio(audio);
+        if (repairs.length && meeting.last_error === 'integrity' && ((meeting.state === 'failed' && meeting.failed_stage === 'queued') || meeting.state === 'queued')) {
+          this.db.prepare("UPDATE meetings SET state='queued',attempts=0,last_error=NULL,failed_stage=NULL,retry_at=0 WHERE id=?").run(id);
+        }
+        const saved = this.owned(owner, id);
+        return {id, state: saved.state, committed: true, manifest: receipt(saved)};
+      }
+      const insert = this.db.prepare('INSERT INTO chunks(meeting_id,seq,digest,data) VALUES(?,?,?,?)');
+      for (let seq = 0; seq < count; seq++) {
+        if (existing.has(seq)) continue;
+        const part = chunk(seq);
+        insert.run(id, seq, hash(part), part);
+      }
+      this.db.prepare("UPDATE meetings SET state='queued',reason=?,chunks=?,bytes=?,digest=?,recorded_at=?,time_trust=? WHERE id=?")
+        .run(reason, count, data.length, digest, recordedAt, timeTrust, id);
+      const saved = this.owned(owner, id);
+      const audio = this.checkedAudio(id, saved);
+      if (validateAudio) validateAudio(audio);
+      return {id, state: 'queued', committed: true, manifest: receipt(saved)};
+    });
+  }
   cancel(owner,id,token,validateAudio) { if(!validId(owner)||!validId(id))fail('invalid');return this.tx(()=>{this.authorize(owner,token);const existing=this.db.prepare('SELECT * FROM meetings WHERE id=?').get(id);if(!existing){this.db.prepare("INSERT INTO meetings(id,owner,state,chunk_limit) VALUES(?,?,'cancelled',?)").run(id,owner,MAX_NEW_CHUNKS);return {state:'cancelled'};}const m=this.owned(owner,id); if(m.state==='cancelled'){if(this.db.prepare('SELECT 1 FROM chunks WHERE meeting_id=? LIMIT 1').get(id))fail('deletion_incomplete');return {state:'cancelled'};} if(m.state!=='uploading'){const audio=this.checkedAudio(id,m);if(validateAudio)validateAudio(audio);return {id:m.id,state:'committed',committed:true,manifest:receipt(m)};} this.db.prepare('DELETE FROM chunks WHERE meeting_id=?').run(id);if(this.db.prepare('SELECT 1 FROM chunks WHERE meeting_id=? LIMIT 1').get(id))fail('deletion_incomplete');const changed=this.db.prepare("UPDATE meetings SET state='cancelled' WHERE id=? AND state='uploading'").run(id);if(changed.changes!==1)fail('deletion_incomplete');return {state:'cancelled'};}); }
   audio(lease) { return this.tx(()=>{const m=this.db.prepare("SELECT chunks,bytes,digest FROM meetings WHERE id=? AND state=? AND generation=? AND lease_token=? AND lease_until>CAST(strftime('%s','now') AS INTEGER)").get(lease.id,lease.stage,lease.generation,lease.token);if(!m)fail('stale_lease');const audio=this.checkedAudio(lease.id,m);if(!this.db.prepare("SELECT 1 FROM meetings WHERE id=? AND state=? AND generation=? AND lease_token=? AND lease_until>CAST(strftime('%s','now') AS INTEGER)").get(lease.id,lease.stage,lease.generation,lease.token))fail('stale_lease');return audio;}); }
   renew(lease, ttlSeconds=60) { if(!Number.isInteger(ttlSeconds)||ttlSeconds<1) fail('invalid'); const r=this.db.prepare("UPDATE meetings SET lease_until=CAST(strftime('%s','now') AS INTEGER)+? WHERE id=? AND state=? AND generation=? AND lease_token=? AND lease_until>CAST(strftime('%s','now') AS INTEGER)").run(ttlSeconds,lease.id,lease.stage,lease.generation,lease.token); return r.changes===1; }
