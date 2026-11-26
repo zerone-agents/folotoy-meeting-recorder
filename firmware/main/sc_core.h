@@ -32,6 +32,7 @@ typedef struct {
     uint8_t rec_status;         // SC_REC_*
     uint32_t rec_file;
     uint32_t rec_seconds;
+    bool continuation_upload;
     uint8_t level;              // 麦克风电平 0..100
     bool streaming;             // BLE 实时/离线传输进行中
     bool streaming_realtime;

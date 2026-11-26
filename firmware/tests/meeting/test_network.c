@@ -9,6 +9,11 @@ static int try_calls,fail_try;
 static int replace_management_during_stop,replace_record_during_stop,request_record_during_pass;
 static int release_management_on_stop_wait;
 static int clock_sync_calls,clock_sync_success,clock_sync_record;
+static unsigned targeted_uploads,resumed_cleanups,resumed_deletions;
+static uint32_t targeted_id;
+static bool cancel_targeted,rearm_targeted;
+static bool lifecycle_busy;
+static meeting_upload_result targeted_result=MEETING_UPLOAD_CONFIRMED;
 static unsigned delete_failures;static meeting_network_state state_before_wait;
 static int64_t mono_us=1000000;static time_t wall=1800000000;
 static void (*task_fn)(void *);
@@ -18,7 +23,11 @@ static int read_active_pointer(void *ctx,meeting_wifi_pointer *out){(void)ctx;*o
 time_t fake_time(time_t *p){if(p)*p=wall;return wall;}
 int64_t esp_timer_get_time(void){return mono_us;}
 SemaphoreHandle_t xSemaphoreCreateMutex(void){return (void *)1;}
-BaseType_t xSemaphoreTake(SemaphoreHandle_t h,unsigned wait){(void)h;if(wait==0&&++try_calls==fail_try)return 0;return pdTRUE;}
+BaseType_t xSemaphoreTake(SemaphoreHandle_t h,unsigned wait){
+ if(lifecycle_busy&&h==s_lifecycle_lock){assert(wait==0);return 0;}
+ if(wait==0&&++try_calls==fail_try)return 0;
+ return pdTRUE;
+}
 BaseType_t xSemaphoreGive(SemaphoreHandle_t h){(void)h;return pdTRUE;}
 void vSemaphoreDelete(SemaphoreHandle_t h){(void)h;mutex_deleted++;}
 BaseType_t xTaskCreate(void (*fn)(void *),const char *name,unsigned size,void *arg,unsigned priority,TaskHandle_t *out)
@@ -33,8 +42,8 @@ unsigned ulTaskNotifyTake(BaseType_t clear,unsigned ticks){(void)clear;vTaskDela
 void vTaskDelete(TaskHandle_t h){(void)h;}
 bool sc_wifi_running(void){return wifi_running;}
 bool meeting_sta_running(void){return sta_running;}
-meeting_cleanup_result meeting_runtime_resume_cleanup(void){return MEETING_CLEANUP_DONE;}
-meeting_delete_pass_result meeting_runtime_resume_deletions(const meeting_online_config *config){(void)config;return (meeting_delete_pass_result){.failed=delete_failures};}
+meeting_cleanup_result meeting_runtime_resume_cleanup(void){resumed_cleanups++;return MEETING_CLEANUP_DONE;}
+meeting_delete_pass_result meeting_runtime_resume_deletions(const meeting_online_config *config){(void)config;resumed_deletions++;return (meeting_delete_pass_result){.failed=delete_failures};}
 bool meeting_sta_has_ip(void){return ip;}
 meeting_time_client_result meeting_time_device_sync(meeting_time_challenge *challenge,const char *https,const char *http,
  const meeting_time_anchor *anchor,bool (*cancel)(void *),void *cancel_ctx,const meeting_clock_io *io,meeting_clock *clock){
@@ -50,6 +59,21 @@ esp_err_t meeting_sta_stop(void){if(stop_failure)return ESP_FAIL;sta_running=0;i
  if(replace_record_during_stop){replace_record_during_stop=0;meeting_network_record_release();meeting_network_record_request();}
  return ESP_OK;}
 void meeting_config_clear(meeting_config *c){memset(c,0,sizeof(*c));}
+meeting_upload_result meeting_worker_upload_one(const meeting_online_config *config,uint32_t id)
+{
+    assert(id&&config->https.time_valid(config->https.cancel_ctx));
+    assert(!config->https.is_cancelled(config->https.cancel_ctx));
+    assert(meeting_network_get_state()==MEETING_NETWORK_SYNCING);
+    targeted_uploads++;
+    targeted_id=id;
+    if(cancel_targeted){
+        meeting_network_cancel_continuation();
+        assert(meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE);
+        if(rearm_targeted)assert(meeting_network_continue_after_upload(id));
+        cancel_targeted=false;
+    }
+    return config->has_ip(config->network_ctx)?targeted_result:MEETING_UPLOAD_PAUSED;
+}
 meeting_worker_result meeting_worker_pass(const meeting_online_config *config,sc_file_entry_t *entries,size_t capacity)
 {
     assert(entries&&capacity==UPLOAD_LIST_BATCH&&config->https.time_valid(config->https.cancel_ctx));
@@ -138,6 +162,90 @@ static void test_recording_wifi(void)
     assert(meeting_network_record_ready());
     meeting_network_record_release();
     assert(!meeting_network_record_ready());
+}
+
+static void test_continuation(void)
+{
+    int initial_passes=passes;
+    unsigned initial_cleanups=resumed_cleanups;
+    unsigned initial_deletions=resumed_deletions;
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE);
+    ip=0;
+    assert(!meeting_network_continue_after_upload(42));
+    sta_running=1;
+    ip=1;
+    atomic_store(&s_enabled,false);
+    assert(!meeting_network_continue_after_upload(42));
+    atomic_store(&s_enabled,true);
+    assert(!meeting_network_continue_after_upload(0));
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE);
+
+    int initial_notifications=notifications;
+    lifecycle_busy=true;
+    assert(meeting_network_continue_after_upload(41));
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_UPLOADING);
+    meeting_network_cancel_continuation();
+    meeting_network_cancel_continuation();
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE);
+    lifecycle_busy=false;
+    assert(notifications==initial_notifications);
+
+    meeting_network_record_request();
+    assert(meeting_network_continue_after_upload(42));
+    assert(!meeting_network_continue_after_upload(43));
+    meeting_network_record_saved();
+    run_worker_iteration();
+    assert(meeting_network_record_ready()&&targeted_uploads==0);
+    meeting_network_record_release();
+    run_worker_iteration();
+    assert(targeted_uploads==1&&targeted_id==42);
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_CONFIRMED);
+    assert(state_before_wait==MEETING_NETWORK_IDLE);
+    run_worker_iteration();
+    assert(targeted_uploads==1&&passes==initial_passes);
+    assert(resumed_cleanups==initial_cleanups&&resumed_deletions==initial_deletions);
+
+    /* Acquiring the next record request before clearing keeps the backlog idle. */
+    meeting_network_record_request();
+    meeting_network_cancel_continuation();
+    run_worker_iteration();
+    assert(meeting_network_record_ready()&&passes==initial_passes);
+    meeting_network_record_release();
+
+    /* The old result cannot publish a completion after cancel and rearm,
+     * even if the new attempt explicitly chose the same file. */
+    assert(meeting_network_continue_after_upload(42));
+    cancel_targeted=rearm_targeted=true;
+    run_worker_iteration();
+    assert(targeted_uploads==2&&meeting_network_continuation_state()==MEETING_CONTINUATION_UPLOADING);
+    rearm_targeted=false;
+    cancel_targeted=true;
+    run_worker_iteration();
+    assert(targeted_uploads==3&&meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE);
+    assert(passes==initial_passes&&resumed_cleanups==initial_cleanups&&resumed_deletions==initial_deletions);
+    run_worker_iteration();
+    assert(passes==initial_passes+1&&resumed_cleanups==initial_cleanups+1&&resumed_deletions==initial_deletions+1);
+
+    /* A Wi-Fi loss after the arm maps the worker's pause to a terminal failure. */
+    assert(meeting_network_continue_after_upload(44));
+    ip=0;
+    run_worker_iteration();
+    assert(targeted_uploads==4&&targeted_id==44);
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_FAILED);
+    assert(state_before_wait==MEETING_NETWORK_CONNECTING);
+    run_worker_iteration();
+    assert(targeted_uploads==4&&passes==initial_passes+1);
+    meeting_network_cancel_continuation();
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE);
+
+    ip=1;
+    targeted_result=MEETING_UPLOAD_FAILED;
+    assert(meeting_network_continue_after_upload(45));
+    run_worker_iteration();
+    assert(targeted_uploads==5&&targeted_id==45);
+    assert(meeting_network_continuation_state()==MEETING_CONTINUATION_FAILED);
+    assert(state_before_wait==MEETING_NETWORK_RETRY);
+    meeting_network_cancel_continuation();
 }
 
 int main(void)
@@ -249,5 +357,6 @@ int main(void)
     meeting_network_record_release();clock_sync_record=0;clock_sync_success=1;atomic_store(&s_enabled,true);task_fn(NULL);
     assert(clock_sync_calls==3&&passes==before_pass+1);
     test_recording_wifi();
+    test_continuation();
     return 0;
 }

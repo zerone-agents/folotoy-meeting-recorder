@@ -584,7 +584,7 @@ static bool test_record_once(unsigned seconds,unsigned run)
 }
 #endif
 
-static bool record_start(void)
+static bool record_request_start(void)
 {
     if (s_rec_status == SC_REC_RECORDING) return true;
     int64_t deadline=now_ms()+RECORD_WAIT_MS;
@@ -609,6 +609,14 @@ static bool record_start(void)
     return false;
 }
 
+static bool record_start(void)
+{
+    bool started = record_request_start();
+    // Park the uploader for the start request before dropping its handoff guard.
+    meeting_network_cancel_continuation();
+    return started;
+}
+
 static void record_pause(void)
 {
     if (s_rec_status != SC_REC_RECORDING) return;
@@ -626,6 +634,9 @@ static bool record_stop(uint8_t end_intent)
     if (s_rec_status == SC_REC_STOPPED) return true;
     if(!sc_audio_stop()){toast("Mic stop pending");return false;}
     if(!writer_drain()){toast("Storage write pending");return false;}
+    // A capture fault still marks the saved segment incomplete. Reaching the
+    // frame limit can arm a new segment after confirmation of that saved audio.
+    const bool reached_limit = end_intent == 2;
     s_last_save_incomplete=meeting_frame_barrier_lost(&s_frame_barrier)>0 || sc_audio_capture_fault();
     if(s_last_save_incomplete){
         ESP_LOGW(TAG,"Audio incomplete: queue_lost=%u capture_fault=%d",meeting_frame_barrier_lost(&s_frame_barrier),sc_audio_capture_fault());
@@ -638,6 +649,10 @@ static bool record_stop(uint8_t end_intent)
     lock();
     s_rec_status = SC_REC_STOPPED;
     unlock();
+    if (reached_limit && !s_last_save_failed &&
+        !meeting_network_continue_after_upload(s_rec_file)) {
+        toast("Saved - no next segment");
+    }
     if(meeting_network_enabled()&&!sc_audio_release_encoder_idle())ESP_LOGW(TAG,"Audio resources still busy; upload may wait");
     (void)meeting_runtime_record_end();
     if (!s_last_save_failed) meeting_network_record_saved();
@@ -861,7 +876,10 @@ static void handle_cmd(const sc_cmd_t *cmd, void *ctx)
             } else if (cmd->payload[0] == 2) {
                 if (s_record_pending) {
                     record_cancel_pending();toast("Start cancelled");
-                } else record_pause();
+                } else {
+                    meeting_network_cancel_continuation();
+                    record_pause();
+                }
             }
             send_record_status();
         }
@@ -1103,6 +1121,11 @@ static void on_key(bsp_btn_t btn, bsp_btn_ev_t ev)
         }
         send_record_status();
     } else if (ev == BSP_BTN_LONG) {
+        if (meeting_network_continuation_state() != MEETING_CONTINUATION_IDLE) {
+            meeting_network_cancel_continuation();
+            toast("Next segment cancelled");
+            if (!sc_ui_device_page()) return;
+        }
         if (s_record_pending) {
             record_cancel_pending();toast("Start cancelled");
         } else if (s_link >= SC_LINK_WIFI_AP) {
@@ -1134,8 +1157,8 @@ static void tick(void)
         if(s_rec_status!=SC_REC_STOPPED&&writer_event.id==s_rec_file){
             bool saved=record_stop(writer_event.reason==1?2:3);
             send_record_status();
-            if(saved&&!s_last_save_incomplete)
-                toast(writer_event.reason==1?"30 minute limit - saved":"Storage full - saved");
+            if (saved && !s_last_save_incomplete && writer_event.reason != 1)
+                toast("Storage full - saved");
             if(saved||s_rec_status==SC_REC_STOPPED)handled_writer_sequence=writer_event.sequence;
         }else handled_writer_sequence=writer_event.sequence;
     }
@@ -1290,6 +1313,16 @@ static void tick(void)
         s_management_legacy_stopped=false;ble_start();
     }
 
+    meeting_continuation_state continuation = meeting_network_continuation_state();
+    if (continuation == MEETING_CONTINUATION_CONFIRMED) {
+        if (record_start()) toast("Recording");
+        else if (!s_record_pending) toast("Saved - no next segment");
+        send_record_status();
+    } else if (continuation == MEETING_CONTINUATION_FAILED) {
+        meeting_network_cancel_continuation();
+        toast("Saved - no next segment");
+    }
+
     if (s_record_pending) {
         bool preempt_ok=true;
         bool preempt_complete=!s_record_preempt_generation||
@@ -1407,6 +1440,7 @@ static void handle_event(const ev_t *ev)
         uint32_t file_id;memcpy(&file_id,ev->data,sizeof(file_id));
         if(!file_id||s_delete_review_busy||s_delete_review.stage!=MEETING_DELETE_UI_IDLE||
            s_rec_status!=SC_REC_STOPPED||s_record_pending){toast("Cannot review now");break;}
+        meeting_network_cancel_continuation();
         if(++s_delete_token==0)++s_delete_token;
         lock();s_delete_review_busy=true;s_delete_review_file=file_id;unlock();
         if(meeting_delete_job_start(s_delete_token,file_id,MEETING_DELETE_JOB_REVIEW,MEETING_DELETE_UNKNOWN,delete_job_done,NULL)!=ESP_OK){
@@ -1601,6 +1635,7 @@ void sc_core_snapshot(sc_snapshot_t *out)
     out->delete_review_file=s_delete_review_file;
     out->delete_review=s_delete_review;
     unlock();
+    out->continuation_upload = meeting_network_continuation_state() == MEETING_CONTINUATION_UPLOADING;
     meeting_network_target_ssid(out->target_ssid);
     out->wifi_ap_missing=meeting_sta_ap_missing();
     wifi_ap_record_t ap;

@@ -13,6 +13,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#ifdef ESP_PLATFORM
+#include "freertos/portmacro.h"
+#endif
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +56,24 @@ static char s_http_origin[201];
 static bool s_time_restore;
 static SemaphoreHandle_t s_clock_lock,s_lifecycle_lock;
 static atomic_bool s_enabled,s_stop_requested;
+typedef struct {
+    uint32_t id;
+    uint32_t generation;
+    meeting_continuation_state state;
+} upload_continuation;
+/* Publish the phase atomically for the display and core. Keep the worker's
+ * ID/epoch snapshot consistent without waiting on the supervisor lifecycle. */
+static atomic_int s_continuation_phase;
+static uint32_t s_continuation_id,s_continuation_generation;
+#ifdef ESP_PLATFORM
+static portMUX_TYPE s_continuation_guard=portMUX_INITIALIZER_UNLOCKED;
+static void continuation_lock(void){portENTER_CRITICAL(&s_continuation_guard);}
+static void continuation_unlock(void){portEXIT_CRITICAL(&s_continuation_guard);}
+#else
+static atomic_flag s_continuation_guard=ATOMIC_FLAG_INIT;
+static void continuation_lock(void){while(atomic_flag_test_and_set_explicit(&s_continuation_guard,memory_order_acquire)){}}
+static void continuation_unlock(void){atomic_flag_clear_explicit(&s_continuation_guard,memory_order_release);}
+#endif
 /* Low bits hold the phase. A new request advances the generation so a late
  * worker completion cannot publish readiness for the next request. */
 enum {
@@ -95,9 +116,9 @@ meeting_network_state meeting_network_get_state(void)
         return MEETING_NETWORK_IDLE;
     return (meeting_network_state)atomic_load(&s_state);
 }
-static void notify_worker(void)
+static void notify_worker(TickType_t wait)
 {
-    if(!s_lifecycle_lock||xSemaphoreTake(s_lifecycle_lock,portMAX_DELAY)!=pdTRUE)return;
+    if(!s_lifecycle_lock||xSemaphoreTake(s_lifecycle_lock,wait)!=pdTRUE)return;
     if(s_task)xTaskNotifyGive(s_task);
     xSemaphoreGive(s_lifecycle_lock);
 }
@@ -124,13 +145,56 @@ void meeting_network_record_saved(void)
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
     if(record_requested()&&meeting_commission_allowed())atomic_store(&s_test_saved_recording,true);
 #endif
-    if(meeting_network_enabled())notify_worker();
+    if(meeting_network_enabled())notify_worker(portMAX_DELAY);
+}
+bool meeting_network_continue_after_upload(uint32_t file_id)
+{
+    if(!file_id)return false;
+    continuation_lock();
+    bool armed=meeting_network_enabled()&&!atomic_load(&s_stop_requested)&&
+        atomic_load(&s_continuation_phase)==MEETING_CONTINUATION_IDLE&&meeting_sta_has_ip();
+    if(armed){
+        s_continuation_id=file_id;
+        ++s_continuation_generation;
+        atomic_store(&s_continuation_phase,MEETING_CONTINUATION_UPLOADING);
+    }
+    continuation_unlock();
+    /* Saving and releasing the recording also wake the worker. Keep this
+     * notification opportunistic when lifecycle owns the task handle. */
+    if(armed)notify_worker(0);
+    return armed;
+}
+static upload_continuation continuation_snapshot(void)
+{
+    continuation_lock();
+    upload_continuation result={
+        .id=s_continuation_id,.generation=s_continuation_generation,
+        .state=(meeting_continuation_state)atomic_load(&s_continuation_phase)
+    };
+    continuation_unlock();
+    return result;
+}
+meeting_continuation_state meeting_network_continuation_state(void)
+{
+    return (meeting_continuation_state)atomic_load(&s_continuation_phase);
+}
+void meeting_network_cancel_continuation(void)
+{
+    if(meeting_network_continuation_state()==MEETING_CONTINUATION_IDLE)return;
+    continuation_lock();
+    bool cleared=atomic_load(&s_continuation_phase)!=MEETING_CONTINUATION_IDLE;
+    if(cleared){
+        s_continuation_id=0;
+        atomic_store(&s_continuation_phase,MEETING_CONTINUATION_IDLE);
+    }
+    continuation_unlock();
+    if(cleared)notify_worker(0);
 }
 void meeting_network_record_request(void)
 {
     unsigned state=atomic_load(&s_record_state);
     atomic_store(&s_record_state,((state&~RECORD_PHASE_MASK)+RECORD_PHASE_MASK+1u)|RECORD_PENDING);
-    if(meeting_network_enabled())notify_worker();
+    if(meeting_network_enabled())notify_worker(portMAX_DELAY);
 }
 bool meeting_network_record_ready(void)
 {
@@ -148,19 +212,19 @@ bool meeting_network_record_require_offline(void)
     unsigned recording=atomic_load(&s_record_state);
     if(!meeting_network_enabled()||atomic_load(&s_stop_requested)||record_phase(recording)!=RECORD_READY_WITH_STA||
        !record_transition(recording,RECORD_DRAIN_PENDING))return false;
-    notify_worker();
+    notify_worker(portMAX_DELAY);
     return true;
 }
 void meeting_network_record_release(void)
 {
     unsigned recording=atomic_load(&s_record_state);
     atomic_store(&s_record_state,recording&~RECORD_PHASE_MASK);
-    if(meeting_network_enabled())notify_worker();
+    if(meeting_network_enabled())notify_worker(portMAX_DELAY);
 }
 void meeting_network_management_request(void)
 {
     management_set_phase(MANAGEMENT_PENDING);
-    if(meeting_network_enabled())notify_worker();
+    if(meeting_network_enabled())notify_worker(portMAX_DELAY);
 }
 bool meeting_network_management_ready(void)
 {unsigned state=atomic_load(&s_management_state);return (state&MANAGEMENT_MASK)!=MANAGEMENT_IDLE&&!record_requested()&&
@@ -168,7 +232,7 @@ bool meeting_network_management_ready(void)
 void meeting_network_management_release(void)
 {
     management_set_phase(MANAGEMENT_IDLE);
-    if(meeting_network_enabled())notify_worker();
+    if(meeting_network_enabled())notify_worker(portMAX_DELAY);
 }
 static char display_ssid[33];
 
@@ -260,6 +324,21 @@ static void park_for_radio(unsigned recording,unsigned management)
     if(atomic_load(&s_management_state)==management&&!atomic_load(&s_stop_requested))
         (void)record_transition(recording,ready);
 }
+static void finish_continuation(upload_continuation pending,meeting_upload_result result)
+{
+    meeting_network_state state=MEETING_NETWORK_IDLE;
+    if(!meeting_sta_has_ip())state=MEETING_NETWORK_CONNECTING;
+    else if(!time_valid(NULL))state=MEETING_NETWORK_CLOCK_REQUIRED;
+    else if(result!=MEETING_UPLOAD_CONFIRMED)state=MEETING_NETWORK_RETRY;
+    continuation_lock();
+    if(!atomic_load(&s_stop_requested)&&atomic_load(&s_continuation_phase)==MEETING_CONTINUATION_UPLOADING&&
+       s_continuation_generation==pending.generation&&s_continuation_id==pending.id){
+        atomic_store(&s_state,state);
+        atomic_store(&s_continuation_phase,result==MEETING_UPLOAD_CONFIRMED?
+            MEETING_CONTINUATION_CONFIRMED:MEETING_CONTINUATION_FAILED);
+    }
+    continuation_unlock();
+}
 static void task(void *arg)
 {
     (void)arg;
@@ -300,6 +379,18 @@ static void task(void *arg)
             continue;
         }
         if(cancelled(NULL))continue;
+        upload_continuation continuation=continuation_snapshot();
+        if(continuation.state!=MEETING_CONTINUATION_IDLE){
+            if(continuation.state==MEETING_CONTINUATION_UPLOADING){
+                atomic_store(&s_state,MEETING_NETWORK_SYNCING);
+                meeting_upload_result result=meeting_worker_upload_one(&config,continuation.id);
+                finish_continuation(continuation,result);
+            }
+            /* The core acquires the next record request before consuming a
+             * success, so background work cannot take that handoff. */
+            (void)ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(RETRY_MS));
+            continue;
+        }
 #if CONFIG_MEETING_SUPERVISED_TEST_OFFLINE_SECONDS > 0
         if(!test_finished&&atomic_exchange(&s_test_saved_recording,false))test_armed=true;
         if(test_armed&&!test_started){
@@ -394,6 +485,10 @@ static void task(void *arg)
             memset(&s_anchor,0,sizeof(s_anchor));memset(s_http_origin,0,sizeof(s_http_origin));s_time_restore=false;
             memset(&s_clock_io,0,sizeof(s_clock_io));
             if(s_clock_lock){vSemaphoreDelete(s_clock_lock);s_clock_lock=NULL;}
+            continuation_lock();
+            s_continuation_id=0;
+            atomic_store(&s_continuation_phase,MEETING_CONTINUATION_IDLE);
+            continuation_unlock();
             s_task=NULL;atomic_store(&s_state,MEETING_NETWORK_OFF);atomic_store(&s_enabled,false);
             xSemaphoreGive(s_lifecycle_lock);
         }
