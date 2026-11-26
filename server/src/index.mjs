@@ -8,7 +8,7 @@ import { createRuntimeMinutes } from './runtime-minutes.mjs';
 import { transcribe } from './asr.mjs';
 import { startWorkerPool } from './worker-pool.mjs';
 import { retentionFromEnv,storageLimitFromEnv,portFromEnv,requireToken,workerConcurrencyFromEnv } from './config.mjs';
-import { validateTls,waitForListening } from './startup.mjs';
+import { meetingServerTimeouts,validateTls,waitForListening } from './startup.mjs';
 import { acquireServiceLock } from './service-lock.mjs';
 import { prepareDataDirectory } from './storage-path.mjs';
 import { createPublicFetch } from './public-fetch.mjs';
@@ -54,8 +54,18 @@ const adapters={activeWork,asrProgress,shutdownSignal:shutdown.signal,asr:(audio
 let stopping=false;
 const publicFetch=createPublicFetch(host.app.fetch,{isStopping:()=>stopping});
 let server;
-try{server=serve({fetch:publicFetch,hostname:config.server.host,port:config.server.port,...(httpMode?{}:{createServer,serverOptions:{key,cert}})});await waitForListening(server)}catch(error){await host.stop();store.close();serviceLock.close();throw error}
-server.headersTimeout=15000;server.requestTimeout=30000;server.keepAliveTimeout=5000;
+const transport = httpMode
+ ? {serverOptions: meetingServerTimeouts}
+ : {createServer, serverOptions: {...meetingServerTimeouts, key, cert}};
+try {
+ server = serve({fetch: publicFetch, hostname: config.server.host, port: config.server.port, ...transport});
+ await waitForListening(server);
+} catch (error) {
+ await host.stop();
+ store.close();
+ serviceLock.close();
+ throw error;
+}
 const address=server.address();console.log(`meeting service listening on ${address.address}:${address.port}`);
 const stopMaintenance=startMaintenance(store,{retentionSeconds,onError:code=>console.error(code)});const stopTimeMaintenance=startTimeMaintenance(timeKeys,{onError:code=>console.error(code)});const stopWorkers=startWorkerPool(store,adapters,{limit:workerConcurrency,onError:code=>console.error(code)});const stopSubscriptions=startSubscriptionWorker(store,{baseUrl:meetingPublicBaseUrl,onError:code=>console.error(code)});
 async function stop(){if(stopping)return;stopping=true;stopMaintenance();stopTimeMaintenance();shutdown.abort();for(const controller of activeWork.values())controller.abort();const closing=new Promise(r=>server.close(r));const force=setTimeout(()=>{publicFetch.abortAll();server.closeAllConnections()},10000);await closing;clearTimeout(force);publicFetch.abortAll();await publicFetch.waitForIdle();await stopWorkers();await stopSubscriptions();await host.stop();store.close();serviceLock.close()}
