@@ -3,10 +3,22 @@
 #include <stdint.h>
 typedef void *esp_http_client_handle_t;
 typedef enum {HTTP_METHOD_POST,HTTP_METHOD_PUT,HTTP_METHOD_GET} esp_http_client_method_t;
-typedef struct {const char *url,*cert_pem,*common_name;int timeout_ms;bool disable_auto_redirect,skip_cert_common_name_check;} esp_http_client_config_t;
+typedef int esp_err_t;
+typedef enum {HTTP_EVENT_ON_HEADER} esp_http_client_event_id_t;
+typedef struct {
+ esp_http_client_event_id_t event_id;
+ void *user_data;
+ char *header_key,*header_value;
+} esp_http_client_event_t;
+typedef struct {
+ const char *url,*cert_pem,*common_name;
+ int timeout_ms;
+ bool disable_auto_redirect,skip_cert_common_name_check;
+ esp_err_t (*event_handler)(esp_http_client_event_t *);
+ void *user_data;
+} esp_http_client_config_t;
 #define ESP_OK 0
 #define ESP_ERR_NOT_FOUND 0x105
-typedef int esp_err_t;
 #define ESP_ERR_HTTP_EAGAIN 0x7007
 esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t*);
 int esp_http_client_set_url(esp_http_client_handle_t,const char*);

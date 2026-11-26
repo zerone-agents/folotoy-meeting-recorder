@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { createHash, timingSafeEqual, randomBytes } from 'node:crypto';
-import { StoreError } from './store.mjs';
+import { MAX_WHOLE_AUDIO_BYTES, StoreError } from './store.mjs';
 import { toOgg,validateAudioStructure } from './audio.mjs';
 import { meetingUi, meetingIcon } from './ui.mjs';
 import { shareUi } from './share-ui.mjs';
@@ -107,6 +107,24 @@ export function createMeetingRouter(store,{adminToken,adminId='local-admin',rete
  app.get('/meetings/:id/chunks-window/:first',c=>{const first=c.req.param('first');if(!/^(0|[1-9][0-9]*)$/.test(first))throw new StoreError('invalid');return c.json(store.chunkWindow(device(c),c.req.param('id'),Number(first),c.get('principal').token))});
  app.get('/meetings/:id',c=>c.json(store.list(device(c),c.req.param('id'),c.get('principal').token,validateUploadedAudio)));
  app.put('/meetings/:id/chunks/:seq',async c=>{const seq=c.req.param('seq');if(!/^(0|[1-9][0-9]*)$/.test(seq))throw new StoreError('invalid');const bytes=await bounded(c.req.raw,262144);const created=store.put(device(c),c.req.param('id'),Number(seq),bytes,c.req.header('x-content-sha256')??'',c.get('principal').token);return c.json({created:created===true,repaired:created==='repaired'},created===true?201:200)});
+ app.put('/meetings/:id/audio', async c => {
+  c.header('X-Meeting-Upload-Mode', 'whole-v1');
+  const length = c.req.header('content-length') ?? '';
+  const bytes = Number(length);
+  const recorded = c.req.header('x-meeting-recorded-at');
+  if (!/^[1-9][0-9]*$/.test(length) || !Number.isSafeInteger(bytes) ||
+      c.req.header('content-type')?.toLowerCase() !== 'application/octet-stream' ||
+      (recorded !== undefined && !/^(0|[1-9][0-9]*)$/.test(recorded))) throw new StoreError('invalid');
+  if (bytes > MAX_WHOLE_AUDIO_BYTES) throw new StoreError('limit');
+  const data = await bounded(c.req.raw, bytes);
+  if (data.length !== bytes) throw new StoreError('invalid');
+  return c.json(store.putAudio(device(c), c.req.param('id'), data, {
+   digest: c.req.header('x-content-sha256'),
+   reason: c.req.header('x-meeting-end-reason'),
+   timeTrust: c.req.header('x-meeting-time-trust'),
+   recordedAt: recorded === undefined ? null : Number(recorded)
+  }, c.get('principal').token, validateUploadedAudio));
+ });
  app.post('/meetings/:id/finalize',async c=>{const body=await json(c.req.raw);return c.json(store.finalize(device(c),c.req.param('id'),body,c.get('principal').token,validateUploadedAudio))});
  app.post('/meetings/:id/cancel',c=>c.json(store.cancel(device(c),c.req.param('id'),c.get('principal').token,validateUploadedAudio)));
  return app;
